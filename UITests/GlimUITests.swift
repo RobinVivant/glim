@@ -1,0 +1,188 @@
+import XCTest
+
+/// Drives the real app against scripts/mock-bridge.py and checks both sides:
+/// what the screen shows and what the bridge received.
+///
+/// Start the mock first: scripts/mock-bridge.py 8443
+/// Screenshots go to $GLIM_SHOTS when set (pass TEST_RUNNER_GLIM_SHOTS=<dir> to xcodebuild).
+final class GlimUITests: XCTestCase {
+    private let bridge = MockBridge(host: ProcessInfo.processInfo.environment["GLIM_BRIDGE_HOST"] ?? "127.0.0.1:8443")
+
+    override func setUp() {
+        continueAfterFailure = false
+    }
+
+    @MainActor
+    func testPairControlAndFollowTheBridge() async throws {
+        let bridge = bridge
+        let app = XCUIApplication()
+        app.launchEnvironment["GLIM_RESET"] = "1"
+        app.launchEnvironment["GLIM_BRIDGE_HOST"] = bridge.host
+        app.launch()
+
+        // Setup pairs by itself once the bridge stops refusing, then the rooms appear.
+        XCTAssertTrue(app.buttons["power-Kitchen"].waitForExistence(timeout: 20), "home screen did not appear")
+        try await bridge.put("grouped_light", named: "Kitchen", ["on": ["on": false]])
+        try await bridge.put("grouped_light", named: "Office", ["on": ["on": false]])
+        XCTAssertTrue(app.buttons["power-Kitchen"].wait(for: \.label, toEqual: "Turn on", timeout: 5))
+        shot("01-home")
+
+        // Power: the screen flips at once and the bridge gets the command.
+        app.buttons["power-Kitchen"].tap()
+        XCTAssertEqual(app.buttons["power-Kitchen"].label, "Turn off")
+        try await expectBridge("Kitchen on") { try await bridge.groupedLight("Kitchen").on }
+
+        // Brightness: drag the bar from its right end to the middle.
+        let bar = app.otherElements["brightness-Kitchen"]
+        XCTAssertEqual(bar.value as? String, "100 percent")
+        bar.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5))
+            .press(forDuration: 0.1, thenDragTo: bar.coordinate(withNormalizedOffset: CGVector(dx: 0.4, dy: 0.5)))
+        let shown = Int((bar.value as? String ?? "").split(separator: " ").first ?? "") ?? -1
+        XCTAssertTrue((35...65).contains(shown), "bar shows \(shown)")
+        try await expectBridge("Kitchen brightness follows the bar") {
+            abs(try await bridge.groupedLight("Kitchen").brightness - Double(shown)) <= 1
+        }
+        shot("02-kitchen-dimmed")
+
+        // Scene: recall Movie in the living room.
+        app.buttons["scene-Living room-Movie"].tap()
+        try await expectBridge("Movie scene active") { try await bridge.sceneIsActive("Movie") }
+        XCTAssertTrue(app.buttons["scene-Living room-Movie"].isSelected)
+
+        // A change made elsewhere reaches the screen through the event stream.
+        XCTAssertEqual(app.buttons["power-Office"].label, "Turn on")
+        try await bridge.put("grouped_light", named: "Office", ["on": ["on": true]])
+        XCTAssertTrue(app.buttons["power-Office"].wait(for: \.label, toEqual: "Turn off", timeout: 5))
+        shot("03-scene-and-remote-change")
+
+        // Room detail: single lights.
+        app.buttons["open-Living room"].tap()
+        let sofa = app.switches["light-Sofa lamp"]
+        XCTAssertTrue(sofa.waitForExistence(timeout: 5))
+        shot("04-room-detail")
+        let wasOn = (sofa.value as? String) == "1"
+        sofa.switches.firstMatch.exists ? sofa.switches.firstMatch.tap() : sofa.tap()
+        try await expectBridge("Sofa lamp toggled") { try await bridge.light("Sofa lamp").on != wasOn }
+        app.navigationBars.buttons.firstMatch.tap()
+
+        // All off.
+        app.buttons["All off"].tap()
+        try await expectBridge("everything off") { try await !bridge.anyLightOn() }
+        XCTAssertTrue(app.buttons["power-Kitchen"].wait(for: \.label, toEqual: "Turn on", timeout: 5))
+        shot("05-all-off")
+
+        // Relaunch paired: the rooms are there from the cache without setup.
+        app.terminate()
+        app.launchEnvironment["GLIM_RESET"] = nil
+        let started = Date()
+        app.launch()
+        XCTAssertTrue(app.buttons["power-Kitchen"].waitForExistence(timeout: 5))
+        print("GLIM relaunch to rooms: \(Int(Date().timeIntervalSince(started) * 1000)) ms (includes XCUITest launch overhead)")
+    }
+
+    @MainActor
+    private func expectBridge(_ what: String, _ check: @Sendable () async throws -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(4)
+        while Date() < deadline {
+            if try await check() { return }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTFail("bridge state: \(what)")
+    }
+
+    @MainActor
+    private func shot(_ name: String) {
+        guard let directory = ProcessInfo.processInfo.environment["GLIM_SHOTS"] else { return }
+        try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        try? XCUIScreen.main.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: "\(directory)/\(name).png"))
+    }
+}
+
+/// Reads and writes the mock bridge's state directly, as another Hue app would.
+struct MockBridge: Sendable {
+    let host: String
+    private let session = URLSession(configuration: .ephemeral, delegate: TrustLocalMock(), delegateQueue: nil)
+
+    struct State: Sendable {
+        var on: Bool
+        var brightness: Double
+    }
+
+    private func resources() async throws -> [[String: Any]] {
+        var request = URLRequest(url: URL(string: "https://\(host)/clip/v2/resource")!)
+        request.setValue("mock-application-key", forHTTPHeaderField: "hue-application-key")
+        let (data, _) = try await session.data(for: request)
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return json?["data"] as? [[String: Any]] ?? []
+    }
+
+    private func name(_ resource: [String: Any]) -> String? {
+        (resource["metadata"] as? [String: Any])?["name"] as? String
+    }
+
+    private func state(_ resource: [String: Any]) -> State {
+        State(
+            on: (resource["on"] as? [String: Any])?["on"] as? Bool ?? false,
+            brightness: (resource["dimming"] as? [String: Any])?["brightness"] as? Double ?? 0)
+    }
+
+    private func groupedLightResource(_ groupName: String, in all: [[String: Any]]) throws -> [String: Any] {
+        guard let group = all.first(where: { ["room", "zone"].contains($0["type"] as? String) && name($0) == groupName }),
+            let rid = (group["services"] as? [[String: Any]])?.first?["rid"] as? String,
+            let grouped = all.first(where: { $0["id"] as? String == rid })
+        else { throw URLError(.resourceUnavailable) }
+        return grouped
+    }
+
+    func groupedLight(_ groupName: String) async throws -> State {
+        state(try groupedLightResource(groupName, in: try await resources()))
+    }
+
+    func light(_ lightName: String) async throws -> State {
+        guard let light = try await resources().first(where: { $0["type"] as? String == "light" && name($0) == lightName })
+        else { throw URLError(.resourceUnavailable) }
+        return state(light)
+    }
+
+    func sceneIsActive(_ sceneName: String) async throws -> Bool {
+        let scene = try await resources().first { $0["type"] as? String == "scene" && name($0) == sceneName }
+        return ((scene?["status"] as? [String: Any])?["active"] as? String ?? "inactive") != "inactive"
+    }
+
+    func anyLightOn() async throws -> Bool {
+        try await resources().contains { $0["type"] as? String == "light" && state($0).on }
+    }
+
+    func put(_ type: String, named groupName: String, _ body: [String: Any]) async throws {
+        let id = try groupedLightResource(groupName, in: try await resources())["id"] as? String ?? ""
+        var request = URLRequest(url: URL(string: "https://\(host)/clip/v2/resource/\(type)/\(id)")!)
+        request.httpMethod = "PUT"
+        request.setValue("mock-application-key", forHTTPHeaderField: "hue-application-key")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        _ = try await session.data(for: request)
+    }
+}
+
+/// The mock bridge is a local process with a throwaway self-signed certificate.
+final class TrustLocalMock: NSObject, URLSessionDelegate, Sendable {
+    func urlSession(
+        _ session: URLSession, didReceive challenge: URLAuthenticationChallenge
+    ) async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+        guard challenge.protectionSpace.host == "127.0.0.1", let trust = challenge.protectionSpace.serverTrust else {
+            return (.performDefaultHandling, nil)
+        }
+        return (.useCredential, URLCredential(trust: trust))
+    }
+}
+
+extension XCUIElement {
+    @MainActor
+    func wait(for keyPath: KeyPath<XCUIElement, String>, toEqual expected: String, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if self[keyPath: keyPath] == expected { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+        return self[keyPath: keyPath] == expected
+    }
+}
