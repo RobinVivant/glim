@@ -25,8 +25,13 @@ struct GroupDetailView: View {
         return ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 HStack(spacing: 12) {
-                    BrightnessBar(value: state.brightness, isOn: state.isOn, tint: tint, height: 56) {
-                        store.setGroup(group, brightness: $0)
+                    if state.isDimmable {
+                        BrightnessBar(value: state.brightness, isOn: state.isOn, tint: tint, height: 56) {
+                            store.setGroup(group, brightness: $0)
+                        }
+                    } else {
+                        Text(state.isOn ? "On" : "Off").font(.title3.weight(.semibold))
+                        Spacer()
                     }
                     PowerButton(isOn: state.isOn, tint: tint) { store.setGroup(group, on: !state.isOn) }
                 }

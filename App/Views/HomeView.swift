@@ -88,6 +88,9 @@ struct GroupRow: View, Equatable {
 
     private var tint: Color { state.tint?.color ?? .glow }
 
+    /// The bridge keeps the last known state of lights it cannot reach, so their controls are drawn faded.
+    private var dimming: Double { state.isReachable ? 1 : 0.45 }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
@@ -105,9 +108,13 @@ struct GroupRow: View, Equatable {
                 .accessibilityIdentifier("open-\(group.name)")
                 PowerButton(isOn: state.isOn, tint: tint) { onPower(!state.isOn) }
                     .accessibilityIdentifier("power-\(group.name)")
+                    .opacity(dimming)
             }
-            BrightnessBar(value: state.brightness, isOn: state.isOn, tint: tint, onChange: onBrightness)
-                .accessibilityIdentifier("brightness-\(group.name)")
+            if state.isDimmable {
+                BrightnessBar(value: state.brightness, isOn: state.isOn, tint: tint, onChange: onBrightness)
+                    .accessibilityIdentifier("brightness-\(group.name)")
+                    .opacity(dimming)
+            }
             if !scenes.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -127,6 +134,7 @@ struct GroupRow: View, Equatable {
 
     private var subtitle: String {
         let kind = group.kind == .zone ? "Zone · " : ""
+        if !state.isReachable { return kind + "Unreachable" }
         if !state.isOn || state.lightsOn == 0 { return kind + "Off" }
         if state.lightsOn == state.lightCount { return kind + (state.lightCount == 1 ? "On" : "All \(state.lightCount) on") }
         return kind + "\(state.lightsOn) of \(state.lightCount) on"

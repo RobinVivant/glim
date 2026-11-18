@@ -3,7 +3,7 @@ import XCTest
 /// Drives the real app against scripts/mock-bridge.py and checks both sides:
 /// what the screen shows and what the bridge received.
 ///
-/// Start the mock first: scripts/mock-bridge.py 8443
+/// Start a fresh mock first (the tests assume its initial state): scripts/mock-bridge.py 8443
 /// Screenshots go to $GLIM_SHOTS when set (pass TEST_RUNNER_GLIM_SHOTS=<dir> to xcodebuild).
 final class GlimUITests: XCTestCase {
     private let bridge = MockBridge(host: ProcessInfo.processInfo.environment["GLIM_BRIDGE_HOST"] ?? "127.0.0.1:8443")

@@ -35,6 +35,7 @@ struct RoomEntry: TimelineEntry {
     var room: RoomEntity?
     var isOn = false
     var brightness = 0.0
+    var isDimmable = true
     var tint = Color.glow
     var scenes: [SceneItem] = []
     var isPaired = true
@@ -66,6 +67,7 @@ struct RoomEntry: TimelineEntry {
         room = RoomEntity(id: group.id, name: group.name)
         isOn = state.isOn
         brightness = state.brightness
+        isDimmable = state.isDimmable
         tint = state.tint?.color ?? .glow
         scenes = snapshot.scenes(in: group).map {
             SceneItem(
@@ -137,7 +139,7 @@ struct RoomWidgetView: View {
                     .background(entry.isOn ? AnyShapeStyle(entry.tint.gradient) : AnyShapeStyle(.quaternary), in: .circle)
                 Spacer(minLength: 0)
                 Text(room.name).font(.headline).lineLimit(2).minimumScaleFactor(0.8)
-                Text(entry.isOn ? "\(Int(entry.brightness.rounded()))%" : "Off")
+                Text(entry.isOn ? (entry.isDimmable ? "\(Int(max(entry.brightness, 1).rounded()))%" : "On") : "Off")
                     .font(.subheadline).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)

@@ -127,6 +127,10 @@ public struct GroupState: Hashable, Sendable {
     public var tint: RGB?
     public var lightsOn: Int
     public var lightCount: Int
+    /// False when the group holds only on/off devices such as smart plugs.
+    public var isDimmable: Bool
+    /// False when the bridge has lost contact with every light of the group.
+    public var isReachable: Bool
 }
 
 public struct HueEvent: Sendable {

@@ -50,12 +50,12 @@ do {
         for group in snapshot.groups {
             let state = snapshot.state(of: group)
             let scenes = snapshot.scenes(in: group)
-            let power = state.isOn ? "on \(Int(state.brightness))%" : "off"
+            let power = state.isOn ? "on \(String(format: "%.2f", state.brightness))%" : "off"
             print("[\(group.kind.rawValue)] \(group.name): \(power), \(state.lightsOn)/\(state.lightCount) lights on, \(scenes.count) scenes")
             for light in snapshot.lights(in: group) {
                 let kind = light.xy != nil ? "color" : light.mirekRange != nil ? "white ambiance" : light.brightness != nil ? "dimmable" : "on/off"
                 let reach = snapshot.isReachable(light) ? "" : " (unreachable)"
-                print("    \(light.name): \(light.isOn ? "on" : "off") \(Int(light.brightness ?? 0))% \(kind)\(reach)")
+                print("    \(light.name): \(light.isOn ? "on" : "off") \(light.brightness.map { String(format: "%.2f%%", $0) } ?? "no dimming") \(kind)\(reach)")
             }
             if !scenes.isEmpty {
                 print("    scenes: " + scenes.map { $0.isActive ? "*\($0.name)" : $0.name }.joined(separator: ", "))

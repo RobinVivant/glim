@@ -62,7 +62,7 @@ identifiers (`com.robinvivant.glim`) and the App Group are set in `project.yml` 
 | `App` | The SwiftUI app |
 | `Shared` | App Intents and constants compiled into both the app and the widget extension |
 | `Widgets` | Home Screen widget and controls |
-| `UITests` | A UI test that drives the app against the mock bridge |
+| `UITests` | UI tests that drive the app and its Home Screen widget against the mock bridge |
 | `scripts` | Mock bridge, install script, icon generator |
 
 `Glim.xcodeproj` is generated from `project.yml` by XcodeGen and is not committed.
@@ -89,7 +89,7 @@ cd Packages/HueKit && swift test
 scripts/mock-bridge.py 8443 &
 cd Packages/HueKit && HUE_MOCK_HOST=127.0.0.1:8443 swift test
 
-# UI test in the simulator (needs the mock bridge running)
+# UI tests in the simulator (need a freshly started mock bridge; they assume its initial state)
 xcodebuild -project Glim.xcodeproj -scheme Glim \
   -destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath build test
 ```

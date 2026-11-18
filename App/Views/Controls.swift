@@ -25,7 +25,8 @@ struct BrightnessBar: View {
     @State private var isSideways: Bool?
 
     var body: some View {
-        let shown = dragValue ?? (isOn ? value : 0)
+        // A light can be on at 0, its lowest level; that still reads as on.
+        let shown = dragValue ?? (isOn ? max(value, 1) : 0)
         GeometryReader { proxy in
             let fill = max(0, proxy.size.width * shown / 100)
             ZStack(alignment: .leading) {

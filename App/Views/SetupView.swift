@@ -94,7 +94,15 @@ struct SetupView: View {
         Task {
             #if DEBUG
             // Development: point the app at scripts/mock-bridge.py instead of searching the network.
-            if let host = ProcessInfo.processInfo.environment["GLIM_BRIDGE_HOST"] {
+            let environment = ProcessInfo.processInfo.environment
+            if let host = environment["GLIM_BRIDGE_HOST"] {
+                // With a key as well, skip the link button: for looking at a bridge that is already paired.
+                if let key = environment["GLIM_BRIDGE_KEY"], let bridge = try? await Pairing.probe(host: host) {
+                    return model.paired(
+                        BridgeCredentials(
+                            host: host, bridgeID: bridge.bridgeID, name: bridge.name, applicationKey: key,
+                            certificatePin: bridge.certificatePin))
+                }
                 manualHost = host
                 return probeManualHost()
             }

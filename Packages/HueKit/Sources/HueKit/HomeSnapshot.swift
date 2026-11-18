@@ -59,7 +59,9 @@ public struct HomeSnapshot: Sendable, Equatable {
             brightness: isOn ? (grouped?.brightness ?? average) : 0,
             tint: ColorMath.average(lit.map(\.displayColor)),
             lightsOn: lit.count,
-            lightCount: members.count
+            lightCount: members.count,
+            isDimmable: members.contains { $0.brightness != nil },
+            isReachable: members.isEmpty || members.contains(where: isReachable)
         )
     }
 

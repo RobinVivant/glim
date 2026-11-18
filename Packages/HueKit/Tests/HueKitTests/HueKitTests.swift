@@ -90,6 +90,8 @@ func makeSnapshot() throws -> HomeSnapshot {
         #expect(state.lightsOn == 1)
         #expect(state.lightCount == 2)
         #expect(state.tint != nil)
+        #expect(state.isDimmable)
+        #expect(state.isReachable)  // one of its two lights still answers
     }
 
     @Test func parsesLightCapabilitiesAndReachability() throws {
