@@ -30,10 +30,10 @@ struct GroupDetailView: View {
                             store.setGroup(group, brightness: $0)
                         }
                     } else {
-                        Text(state.isOn ? "On" : "Off").font(.title3.weight(.semibold))
+                        Text(state.isOn ? "On" : "Off").font(.system(size: 22, weight: .heavy))
                         Spacer()
                     }
-                    PowerButton(isOn: state.isOn, tint: tint) { store.setGroup(group, on: !state.isOn) }
+                    PowerButton(isOn: state.isOn, tint: tint, size: 56) { store.setGroup(group, on: !state.isOn) }
                 }
 
                 if lights.contains(where: { $0.mirekRange != nil || $0.xy != nil }) {
@@ -58,7 +58,7 @@ struct GroupDetailView: View {
                 }
 
                 section("Lights") {
-                    VStack(spacing: 10) {
+                    VStack(spacing: 8) {
                         ForEach(lights) { light in
                             LightRow(
                                 light: light,
@@ -73,7 +73,12 @@ struct GroupDetailView: View {
             }
             .padding(16)
         }
-        .background(Color(.systemGroupedBackground))
+        .background {
+            AmbientGlow(spots: [
+                AmbientGlow.Spot(color: tint, opacity: state.isOn && state.isReachable ? 0.25 + state.brightness / 100 * 0.3 : 0)
+            ])
+        }
+        .background(Color.black)
         .navigationTitle(group.name)
         .navigationBarTitleDisplayMode(.inline)
         .sheet(item: $colorLight) { opened in
@@ -84,7 +89,7 @@ struct GroupDetailView: View {
 
     private func section(_ title: String, @ViewBuilder content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(title).font(.footnote.weight(.semibold)).foregroundStyle(.secondary).textCase(.uppercase)
+            Text(title).sectionLabel()
             content()
         }
     }
@@ -105,24 +110,24 @@ struct LightRow: View {
             HStack(spacing: 10) {
                 Button(action: onColor) {
                     Circle()
-                        .fill(light.isOn ? AnyShapeStyle(tint) : AnyShapeStyle(.quaternary))
-                        .frame(width: 26, height: 26)
-                        .overlay(Circle().strokeBorder(.primary.opacity(0.15), lineWidth: 1))
+                        .fill(light.isOn ? AnyShapeStyle(tint) : AnyShapeStyle(.white.opacity(0.12)))
+                        .frame(width: 28, height: 28)
+                        .overlay(Circle().strokeBorder(.white.opacity(0.25), lineWidth: 0.5))
                 }
                 .buttonStyle(.plain)
                 .disabled(!hasColorControls)
                 .accessibilityLabel("Color of \(light.name)")
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(light.name).font(.body.weight(.medium)).lineLimit(1)
+                    Text(light.name).font(.system(size: 16, weight: .semibold)).lineLimit(1)
                     if !isReachable {
-                        Text("Unreachable").font(.caption).foregroundStyle(.orange)
+                        Text("Unreachable").font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.6))
                     }
                 }
                 Spacer(minLength: 0)
                 Toggle("Power", isOn: Binding(get: { light.isOn }, set: { onPower($0) }))
                     .labelsHidden()
-                    .tint(tint)
+                    .tint(.vero)
                     .accessibilityIdentifier("light-\(light.name)")
             }
             if light.brightness != nil {
@@ -131,7 +136,7 @@ struct LightRow: View {
             }
         }
         .padding(14)
-        .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 18))
+        .glass(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .opacity(isReachable ? 1 : 0.55)
     }
 }
@@ -144,7 +149,7 @@ struct LightColorSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text(light.name).font(.headline)
+            Text(light.name).font(.system(size: 17, weight: .bold))
             if let range = light.mirekRange {
                 // Warm is a high mirek value; the slider runs warm to cool, left to right.
                 Slider(

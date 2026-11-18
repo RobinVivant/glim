@@ -3,9 +3,12 @@
 Glim is a personal iPhone app that controls Philips Hue lights by talking straight to the Hue bridge on the home
 network, with no cloud account and no loading screens.
 
-The main screen has one row per room or zone: a power button, a brightness bar and that room's scenes. It opens
-from cached state, applies every touch at once, and follows the bridge's event stream for changes made elsewhere.
-The app and its widget are always dark, whatever the system appearance.
+The main screen has one row per room or zone. The row is its brightness slider: drag sideways to dim, tap the
+power button to switch, tap the row to show its scenes and lights. A bar at the bottom turns everything off or sets
+every room to its Nightlight scene. It opens from cached state, applies every touch at once, and follows the bridge's
+event stream for changes made elsewhere.
+The app and its widget are always dark, whatever the system appearance. The app uses Vero's teal and, on iOS 26
+and later, Liquid Glass controls (a thin material on older versions).
 
 ## Quickstart
 

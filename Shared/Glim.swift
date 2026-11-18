@@ -22,4 +22,6 @@ extension RGB {
 extension Color {
     /// The warm white used when a group has no color of its own to show.
     static let glow = Color(red: 1.0, green: 0.78, blue: 0.42)
+    /// Vero's brand teal, #00CCCC. Filled controls in it take black text.
+    static let vero = Color(red: 0, green: 0.8, blue: 0.8)
 }

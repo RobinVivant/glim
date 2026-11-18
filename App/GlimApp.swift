@@ -10,6 +10,7 @@ struct GlimApp: App {
         WindowGroup {
             RootView()
                 .environment(model)
+                .tint(.vero)
         }
     }
 }

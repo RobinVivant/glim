@@ -32,11 +32,11 @@ final class GlimUITests: XCTestCase {
         XCTAssertEqual(app.buttons["power-Kitchen"].label, "Turn off")
         try await expectBridge("Kitchen on") { try await bridge.groupedLight("Kitchen").on }
 
-        // Brightness: drag the bar from its right end to the middle.
-        let bar = app.otherElements["brightness-Kitchen"]
+        // Brightness: drag the room's row sideways by half its width, starting left of the chevron.
+        let bar = app.descendants(matching: .any)["brightness-Kitchen"]
         XCTAssertEqual(bar.value as? String, "100 percent")
-        bar.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5))
-            .press(forDuration: 0.1, thenDragTo: bar.coordinate(withNormalizedOffset: CGVector(dx: 0.4, dy: 0.5)))
+        bar.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
+            .press(forDuration: 0.1, thenDragTo: bar.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5)))
         let shown = Int((bar.value as? String ?? "").split(separator: " ").first ?? "") ?? -1
         XCTAssertTrue((35...65).contains(shown), "bar shows \(shown)")
         try await expectBridge("Kitchen brightness follows the bar") {
@@ -44,7 +44,9 @@ final class GlimUITests: XCTestCase {
         }
         shot("02-kitchen-dimmed")
 
-        // Scene: recall Movie in the living room.
+        // Scene: open the living room's row, then recall Movie in it.
+        app.buttons["expand-Living room"].tap()
+        XCTAssertTrue(app.buttons["scene-Living room-Movie"].waitForExistence(timeout: 3), "row did not open")
         app.buttons["scene-Living room-Movie"].tap()
         try await expectBridge("Movie scene active") { try await bridge.sceneIsActive("Movie") }
         XCTAssertTrue(app.buttons["scene-Living room-Movie"].isSelected)
