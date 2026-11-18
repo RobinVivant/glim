@@ -99,8 +99,10 @@ struct RoomWidget: Widget {
         AppIntentConfiguration(
             kind: "com.robinvivant.glim.room", intent: RoomWidgetConfiguration.self, provider: RoomTimelineProvider()
         ) { entry in
+            // Glim is dark whatever the system appearance is, like the app (UIUserInterfaceStyle).
             RoomWidgetView(entry: entry)
-                .containerBackground(.fill.tertiary, for: .widget)
+                .containerBackground(Color(red: 0.11, green: 0.11, blue: 0.118), for: .widget)
+                .environment(\.colorScheme, .dark)
         }
         .configurationDisplayName("Room")
         .description("Turn a room on or off and recall its scenes.")

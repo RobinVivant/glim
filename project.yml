@@ -30,6 +30,7 @@ targets:
       properties:
         CFBundleDisplayName: Glim
         UILaunchScreen: {}
+        UIUserInterfaceStyle: Dark
         NSLocalNetworkUsageDescription: Glim talks to your Hue bridge on your home network.
         NSBonjourServices: [_hue._tcp]
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]

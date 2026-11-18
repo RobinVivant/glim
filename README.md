@@ -5,6 +5,7 @@ network, with no cloud account and no loading screens.
 
 The main screen has one row per room or zone: a power button, a brightness bar and that room's scenes. It opens
 from cached state, applies every touch at once, and follows the bridge's event stream for changes made elsewhere.
+The app and its widget are always dark, whatever the system appearance.
 
 ## Quickstart
 
