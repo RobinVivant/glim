@@ -133,6 +133,25 @@ final class GlimUITests: XCTestCase {
         shot("07-widget-on")
     }
 
+    /// Long-presses the widget placed by the test above and picks another room for it.
+    @MainActor
+    func testWidgetRoomCanBeChosen() async throws {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        XCUIDevice.shared.press(.home)
+        let widget = springboard.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Bedroom, '")).firstMatch
+        XCTAssertTrue(widget.waitForExistence(timeout: 5), "no Glim widget on the Home Screen")
+        widget.press(forDuration: 1.5)
+        shot("11-widget-long-press")
+        let editWidget = springboard.buttons["Edit Widget"]
+        XCTAssertTrue(editWidget.waitForExistence(timeout: 4), "long press shows no Edit Widget")
+        editWidget.tap()
+        // The sheet shows a spinner for a few seconds while it asks the extension for the room list.
+        let roomPicker = springboard.cells.containing(.staticText, identifier: "Room").buttons["Bedroom"]
+        XCTAssertTrue(roomPicker.waitForExistence(timeout: 15), "the edit sheet has no room picker")
+        shot("12-widget-edit")
+        XCUIDevice.shared.press(.home)
+    }
+
     @MainActor
     private func expectBridge(_ what: String, _ check: @Sendable () async throws -> Bool) async throws {
         let deadline = Date().addingTimeInterval(4)
