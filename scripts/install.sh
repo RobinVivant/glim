@@ -10,10 +10,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if [[ ! -f Config/Local.xcconfig ]]; then
-  team=$(defaults read com.apple.dt.Xcode IDEProvisioningTeams 2>/dev/null \
-    | sed -n 's/.*teamID = "\{0,1\}\([A-Z0-9]\{10\}\)"\{0,1\};.*/\1/p' | head -1)
+  # Xcode caches the teams of its signed-in accounts once a project has been opened in it; the key that
+  # holds them changed name between Xcode versions, so read the whole domain.
+  team=$(defaults read com.apple.dt.Xcode 2>/dev/null \
+    | sed -n 's/.*teamID = "\{0,1\}\([A-Z0-9]\{10\}\)"\{0,1\};.*/\1/p' | head -1 || true)
   if [[ -z "$team" ]]; then
-    echo "No signing team found. Sign in to Xcode (Settings > Accounts), then run this again,"
+    echo "No signing team found. Sign in to Xcode (Settings > Apple Accounts), open Glim.xcodeproj in it once,"
+    echo "then run this again,"
     echo "or create Config/Local.xcconfig containing: DEVELOPMENT_TEAM = <your 10-character team id>"
     exit 1
   fi
@@ -28,12 +31,23 @@ if [[ -z "$device" ]]; then
   device=$(python3 -c '
 import json, sys
 devices = json.load(open(sys.argv[1]))["result"]["devices"]
-phones = [d for d in devices if d.get("hardwareProperties", {}).get("deviceType") == "iPhone"]
-print(phones[0]["hardwareProperties"]["udid"] if phones else "")' "$listing")
+phones = [d for d in devices
+          if d.get("hardwareProperties", {}).get("deviceType") == "iPhone"
+          and d.get("hardwareProperties", {}).get("reality") != "simulated"]
+# A phone this Mac knows but cannot reach right now is listed too; prefer one that is reachable.
+phones.sort(key=lambda d: d.get("connectionProperties", {}).get("tunnelState") == "unavailable")
+if phones:
+    state = phones[0].get("connectionProperties", {}).get("tunnelState", "")
+    print(phones[0]["hardwareProperties"]["udid"], state)' "$listing")
   rm -f "$listing"
+  if [[ "$device" == *" unavailable" ]]; then
+    echo "The iPhone is known to this Mac but not reachable. Connect it by cable, unlock it, and run this again."
+    exit 1
+  fi
+  device=${device%% *}
 fi
 if [[ -z "$device" ]]; then
-  echo "No iPhone found. Connect it by cable or put it on this Wi-Fi, unlocked."
+  echo "No iPhone found. Connect it by cable and unlock it; tap Trust if it asks."
   exit 1
 fi
 
