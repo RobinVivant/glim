@@ -80,6 +80,59 @@ final class GlimUITests: XCTestCase {
         print("GLIM relaunch to rooms: \(Int(Date().timeIntervalSince(started) * 1000)) ms (includes XCUITest launch overhead)")
     }
 
+    /// Adds the Room widget to the Home Screen and switches a room from it. Runs after
+    /// the test above, which leaves the app paired with the mock bridge.
+    @MainActor
+    func testWidgetOnTheHomeScreen() async throws {
+        let bridge = bridge
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        XCUIDevice.shared.press(.home)
+        XCUIDevice.shared.press(.home)
+        let roomButton = springboard.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Bedroom, '")).firstMatch
+
+        if !roomButton.waitForExistence(timeout: 3) {
+            springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.72)).press(forDuration: 1.6)
+            let edit = springboard.buttons["Edit"]
+            XCTAssertTrue(edit.waitForExistence(timeout: 4), "Home Screen did not enter edit mode")
+            edit.tap()
+            let add = springboard.buttons["Add Widget"]
+            XCTAssertTrue(add.waitForExistence(timeout: 4))
+            add.tap()
+            let search = springboard.searchFields.firstMatch
+            XCTAssertTrue(search.waitForExistence(timeout: 5))
+            search.tap()
+            search.typeText("Glim")
+            let result = springboard.collectionViews.cells
+                .matching(NSPredicate(format: "label CONTAINS[c] 'Glim'")).firstMatch
+            XCTAssertTrue(result.waitForExistence(timeout: 5), "Glim is not in the widget gallery")
+            result.tap()
+            let confirm = springboard.buttons.matching(NSPredicate(format: "label CONTAINS[c] 'Add Widget'")).firstMatch
+            XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+            confirm.tap()
+            let done = springboard.buttons["Done"]
+            if done.waitForExistence(timeout: 3) { done.tap() }
+        }
+
+        // The widget extension reads the shared pairing and shows the bridge's state.
+        try await bridge.put("grouped_light", named: "Bedroom", ["on": ["on": false]])
+        let off = springboard.buttons["Bedroom, Off"]
+        if !off.waitForExistence(timeout: 3) {
+            // The widget only redraws when asked; opening the app and leaving it does that.
+            XCUIApplication().activate()
+            XCUIDevice.shared.press(.home)
+        }
+        XCTAssertTrue(off.waitForExistence(timeout: 10), "widget does not show the bedroom as off")
+        shot("06-widget-off")
+
+        // Tapping it runs the intent inside the extension: the bridge gets the command and the widget redraws.
+        off.tap()
+        try await expectBridge("Bedroom on from the widget") { try await bridge.groupedLight("Bedroom").on }
+        let on = springboard.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Bedroom, ' AND label ENDSWITH '%'"))
+            .firstMatch
+        XCTAssertTrue(on.waitForExistence(timeout: 10), "widget did not redraw as on")
+        shot("07-widget-on")
+    }
+
     @MainActor
     private func expectBridge(_ what: String, _ check: @Sendable () async throws -> Bool) async throws {
         let deadline = Date().addingTimeInterval(4)
