@@ -101,12 +101,40 @@ struct RoomWidget: Widget {
         ) { entry in
             // Glim is dark whatever the system appearance is, like the app (UIUserInterfaceStyle).
             RoomWidgetView(entry: entry)
-                .containerBackground(Color(red: 0.11, green: 0.11, blue: 0.118), for: .widget)
+                .containerBackground(for: .widget) { RoomWidgetBackground(entry: entry) }
                 .environment(\.colorScheme, .dark)
         }
         .configurationDisplayName("Room")
         .description("Turn a room on or off and recall its scenes.")
         .supportedFamilies([.systemSmall, .systemMedium])
+    }
+}
+
+/// Black, with a soft patch of the room's light when it is on, like the app's background.
+struct RoomWidgetBackground: View {
+    let entry: RoomEntry
+
+    var body: some View {
+        ZStack {
+            Color.black
+            if entry.isOn {
+                RadialGradient(
+                    colors: [entry.tint.opacity(0.22 + entry.level / 100 * 0.3), .clear],
+                    center: .topLeading, startRadius: 0, endRadius: 240)
+            }
+        }
+    }
+}
+
+extension RoomEntry {
+    /// What the slider shows: 0...100, full for on/off devices that are on.
+    var level: Double { isOn ? (isDimmable ? max(brightness, 1) : 100) : 0 }
+
+    var levelText: String { isOn ? (isDimmable ? "\(Int(max(brightness, 1).rounded()))%" : "On") : "Off" }
+
+    var status: String {
+        guard isOn else { return "Off" }
+        return scenes.first(where: \.isActive)?.name ?? "On"
     }
 }
 
@@ -116,57 +144,126 @@ struct RoomWidgetView: View {
 
     var body: some View {
         if let room = entry.room, entry.isPaired {
-            HStack(alignment: .top, spacing: 14) {
-                power(room)
-                if family == .systemMedium, !entry.scenes.isEmpty {
-                    scenes
-                }
+            if family == .systemMedium {
+                medium(room)
+            } else {
+                small(room)
             }
         } else {
             VStack(spacing: 6) {
                 Image(systemName: "lightbulb.slash").font(.title2)
                 Text(entry.isPaired ? "No rooms" : "Open Glim to pair").font(.footnote)
             }
-            .foregroundStyle(.secondary)
+            .foregroundStyle(.white.opacity(0.6))
         }
     }
 
-    private func power(_ room: RoomEntity) -> some View {
+    /// The whole widget switches the room; the bar at the bottom shows its brightness.
+    private func small(_ room: RoomEntity) -> some View {
         Button(intent: SetRoomPowerIntent(room: room, on: !entry.isOn)) {
-            VStack(alignment: .leading, spacing: 4) {
-                Image(systemName: entry.isOn ? "lightbulb.fill" : "lightbulb")
-                    .font(.title2.weight(.semibold))
-                    .foregroundStyle(entry.isOn ? Color.black.opacity(0.75) : Color.secondary)
-                    .frame(width: 46, height: 46)
-                    .background(entry.isOn ? AnyShapeStyle(entry.tint.gradient) : AnyShapeStyle(.quaternary), in: .circle)
+            VStack(alignment: .leading, spacing: 2) {
+                powerDot(size: 44)
                 Spacer(minLength: 0)
-                Text(room.name).font(.headline).lineLimit(2).minimumScaleFactor(0.8)
-                Text(entry.isOn ? (entry.isDimmable ? "\(Int(max(entry.brightness, 1).rounded()))%" : "On") : "Off")
-                    .font(.subheadline).foregroundStyle(.secondary)
+                Text(room.name).font(.system(size: 17, weight: .bold)).lineLimit(2).minimumScaleFactor(0.8)
+                Text(entry.status).font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.8))
+                    .lineLimit(1)
+                LevelBar(entry: entry) {
+                    Text(entry.levelText).font(.system(size: 13, weight: .bold)).monospacedDigit()
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .padding(.trailing, 10)
+                }
+                .frame(height: 28)
+                .padding(.top, 6)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("\(room.name), \(entry.levelText)")
     }
 
-    private var scenes: some View {
-        VStack(spacing: 6) {
-            ForEach(entry.scenes.prefix(4)) { scene in
-                Button(intent: ActivateSceneIntent(scene: scene.entity)) {
-                    HStack(spacing: 6) {
-                        Circle().fill(scene.color).frame(width: 10, height: 10)
-                        Text(scene.name).font(.footnote.weight(.medium)).lineLimit(1)
-                        Spacer(minLength: 0)
+    /// The app's room row, with the room's scenes under it.
+    private func medium(_ room: RoomEntity) -> some View {
+        VStack(spacing: 10) {
+            Button(intent: SetRoomPowerIntent(room: room, on: !entry.isOn)) {
+                LevelBar(entry: entry) {
+                    HStack(spacing: 10) {
+                        powerDot(size: 40)
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(room.name).font(.system(size: 16, weight: .bold)).lineLimit(1)
+                            Text(entry.status).font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.8)).lineLimit(1)
+                        }
+                        Spacer(minLength: 6)
+                        Text(entry.levelText).font(.system(size: 16, weight: .bold)).monospacedDigit()
                     }
-                    .padding(.horizontal, 10)
-                    .frame(maxHeight: .infinity)
-                    .background(scene.isActive ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.quaternary), in: .capsule)
+                    .padding(.leading, 6)
+                    .padding(.trailing, 16)
                 }
-                .buttonStyle(.plain)
+                .frame(height: 52)
+                .contentShape(.capsule)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(room.name), \(entry.levelText)")
+
+            if entry.scenes.isEmpty {
+                Spacer(minLength: 0)
+            } else {
+                HStack(alignment: .top, spacing: 4) {
+                    ForEach(entry.scenes.prefix(4)) { scene in
+                        Button(intent: ActivateSceneIntent(scene: scene.entity)) {
+                            VStack(spacing: 4) {
+                                Circle()
+                                    .fill(scene.color)
+                                    .frame(width: 34, height: 34)
+                                    .padding(3)
+                                    .overlay {
+                                        if scene.isActive { Circle().strokeBorder(Color.vero, lineWidth: 2) }
+                                    }
+                                Text(scene.name)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(scene.isActive ? Color.vero : .white.opacity(0.8))
+                                    .lineLimit(1)
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
             }
         }
-        .frame(maxWidth: .infinity)
+    }
+
+    private func powerDot(size: CGFloat) -> some View {
+        Image(systemName: "power")
+            .font(.system(size: size * 0.38, weight: .bold))
+            .foregroundStyle(entry.isOn ? Color.black : Color.white)
+            .frame(width: size, height: size)
+            .background(entry.isOn ? entry.tint : Color.white.opacity(0.10), in: .circle)
+            .shadow(color: entry.isOn ? entry.tint.opacity(0.7) : .clear, radius: 8)
+            .widgetAccentable()
+    }
+}
+
+/// A capsule filled with the room's color up to its brightness, like a row in the app.
+struct LevelBar<Content: View>: View {
+    let entry: RoomEntry
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        GeometryReader { proxy in
+            let fill = proxy.size.width * entry.level / 100
+            ZStack(alignment: .leading) {
+                Rectangle().fill(entry.tint.opacity(0.42)).frame(width: fill).widgetAccentable()
+                if entry.level > 0, entry.level < 100 {
+                    Rectangle().fill(entry.tint.opacity(0.95)).frame(width: 2).offset(x: max(0, fill - 2))
+                }
+                content().frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .background(.white.opacity(0.07))
+        .clipShape(.capsule)
+        .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 1))
     }
 }
 
@@ -201,7 +298,7 @@ struct RoomToggleControl: ControlWidget {
             ControlWidgetToggle(value.room.name, isOn: value.isOn, action: SetRoomPowerIntent(room: value.room)) { isOn in
                 Label(isOn ? "On" : "Off", systemImage: isOn ? "lightbulb.fill" : "lightbulb")
             }
-            .tint(.yellow)
+            .tint(.vero)
         }
         .displayName("Room")
         .description("Turn a room on or off.")
