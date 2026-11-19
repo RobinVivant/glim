@@ -117,7 +117,7 @@ final class GlimUITests: XCTestCase {
 
         // The widget extension reads the shared pairing and shows the bridge's state.
         try await bridge.put("grouped_light", named: "Bedroom", ["on": ["on": false]])
-        let off = springboard.buttons["Bedroom, Off"]
+        let off = springboard.buttons["Bedroom, Off"].firstMatch
         if !off.waitForExistence(timeout: 3) {
             // The widget only redraws when asked; opening the app and leaving it does that.
             XCUIApplication().activate()
@@ -133,6 +133,16 @@ final class GlimUITests: XCTestCase {
             .firstMatch
         XCTAssertTrue(on.waitForExistence(timeout: 10), "widget did not redraw as on")
         shot("07-widget-on")
+
+        // Tapping a part of the bar sets that brightness.
+        let half = springboard.buttons["Bedroom at 50%"].firstMatch
+        XCTAssertTrue(half.waitForExistence(timeout: 5), "widget has no brightness levels")
+        half.tap()
+        try await expectBridge("Bedroom at 50% from the widget") {
+            abs(try await bridge.groupedLight("Bedroom").brightness - 50) <= 1
+        }
+        XCTAssertTrue(springboard.buttons["Bedroom, 50%"].firstMatch.waitForExistence(timeout: 10), "widget did not redraw at 50%")
+        shot("08-widget-half")
     }
 
     /// Long-presses the widget placed by the test above and picks another room for it.
@@ -151,6 +161,15 @@ final class GlimUITests: XCTestCase {
         let roomPicker = springboard.cells.containing(.staticText, identifier: "Room").buttons["Bedroom"]
         XCTAssertTrue(roomPicker.waitForExistence(timeout: 15), "the edit sheet has no room picker")
         shot("12-widget-edit")
+        // The scene picker offers the chosen room's scenes only.
+        let choose = springboard.cells.containing(.staticText, identifier: "Scenes").buttons.firstMatch
+        XCTAssertTrue(choose.exists, "the edit sheet has no scene picker")
+        choose.tap()
+        XCTAssertTrue(springboard.cells.containing(.staticText, identifier: "Aurora").firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(springboard.cells.containing(.staticText, identifier: "Relax").firstMatch.exists)
+        XCTAssertFalse(springboard.cells.containing(.staticText, identifier: "Bright").firstMatch.exists)
+        XCTAssertFalse(springboard.cells.containing(.staticText, identifier: "Movie").firstMatch.exists)
+        shot("13-widget-scenes")
         XCUIDevice.shared.press(.home)
     }
 

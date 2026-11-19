@@ -34,7 +34,8 @@ The app pairs with the mock by itself and shows four rooms and a zone.
   link button.
 - Turns rooms, zones and single lights on and off, dims them, and sets white temperature and color.
 - Recalls Hue scenes, and turns everything off with one button.
-- Offers a Home Screen widget for a room (power and scenes).
+- Offers a Home Screen widget for a room in small, medium and large sizes: power, brightness steps (5, 25, 50, 75
+  and 100%) and scenes. Edit Widget picks the room and which scenes it shows.
 - Offers Control Center, Lock Screen and Action button controls: a room toggle, a scene, and all lights off.
 - Exposes Shortcuts and Siri actions: toggle a room, set its power or brightness, activate a scene, all lights off.
 

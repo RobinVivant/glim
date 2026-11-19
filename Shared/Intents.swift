@@ -115,6 +115,13 @@ struct SetRoomBrightnessIntent: AppIntent {
     @Parameter(title: "Room") var room: RoomEntity
     @Parameter(title: "Brightness", inclusiveRange: (1, 100)) var brightness: Int
 
+    init() {}
+
+    init(room: RoomEntity, brightness: Int) {
+        self.room = room
+        self.brightness = brightness
+    }
+
     func perform() async throws -> some IntentResult {
         try await Glim.remote.setGroup(room.id, brightness: Double(brightness))
         Glim.reloadWidgets()

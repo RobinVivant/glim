@@ -17,9 +17,40 @@ struct GlimWidgetBundle: WidgetBundle {
 
 struct RoomWidgetConfiguration: WidgetConfigurationIntent {
     static let title: LocalizedStringResource = "Room"
-    static let description = IntentDescription("Choose the room this widget controls.")
+    static let description = IntentDescription("Choose the room this widget controls and the scenes it shows.")
 
     @Parameter(title: "Room") var room: RoomEntity?
+
+    /// Scene ids. Plain strings, not scene entities: WidgetKit hands an entity array back empty.
+    @Parameter(
+        title: "Scenes",
+        description: "Leave empty to show the room's first scenes. The medium widget shows 4, the large one 8.",
+        optionsProvider: RoomSceneOptions())
+    var scenes: [String]?
+
+    static var parameterSummary: some ParameterSummary {
+        When(widgetFamily: .equalTo, .systemSmall) {
+            Summary { \.$room }
+        } otherwise: {
+            Summary {
+                \.$room
+                \.$scenes
+            }
+        }
+    }
+}
+
+/// The scenes of the room the widget is set to, for its scene picker.
+struct RoomSceneOptions: DynamicOptionsProvider {
+    @IntentParameterDependency<RoomWidgetConfiguration>(\.$room) var configuration
+
+    func results() async throws -> ItemCollection<String> {
+        let snapshot = Glim.remote.cachedSnapshot()
+        let chosen = (configuration?.room.id).flatMap(snapshot.group)
+        guard let group = chosen ?? snapshot.groups.first else { return ItemCollection(sections: []) }
+        let items = snapshot.scenes(in: group).map { IntentItem($0.id, title: "\($0.name)") }
+        return ItemCollection(sections: [IntentItemSection(items: items)])
+    }
 }
 
 struct RoomEntry: TimelineEntry {
@@ -61,7 +92,9 @@ struct RoomEntry: TimelineEntry {
         self.isPaired = isPaired
     }
 
-    init(snapshot: HomeSnapshot, roomID: String?) {
+    /// `sceneIDs` are the scenes picked for the widget, in order; with none picked, or none of them
+    /// in this room, it shows the room's scenes.
+    init(snapshot: HomeSnapshot, roomID: String?, sceneIDs: [String] = []) {
         guard let group = roomID.flatMap(snapshot.group) ?? snapshot.groups.first else { return }
         let state = snapshot.state(of: group)
         room = RoomEntity(id: group.id, name: group.name)
@@ -69,7 +102,9 @@ struct RoomEntry: TimelineEntry {
         brightness = state.brightness
         isDimmable = state.isDimmable
         tint = state.tint?.color ?? .glow
-        scenes = snapshot.scenes(in: group).map {
+        let roomScenes = snapshot.scenes(in: group)
+        let picked = sceneIDs.compactMap { id in roomScenes.first { $0.id == id } }
+        scenes = (picked.isEmpty ? roomScenes : picked).map {
             SceneItem(
                 id: $0.id, name: $0.name, color: $0.swatches.first?.color ?? .glow, isActive: $0.isActive,
                 entity: SceneEntity(id: $0.id, name: $0.name, roomName: group.name))
@@ -82,14 +117,18 @@ struct RoomTimelineProvider: AppIntentTimelineProvider {
 
     func snapshot(for configuration: RoomWidgetConfiguration, in context: Context) async -> RoomEntry {
         guard Glim.remote.isPaired else { return .preview }
-        return RoomEntry(snapshot: Glim.remote.cachedSnapshot(), roomID: configuration.room?.id)
+        return RoomEntry(
+            snapshot: Glim.remote.cachedSnapshot(), roomID: configuration.room?.id,
+            sceneIDs: configuration.scenes ?? [])
     }
 
     func timeline(for configuration: RoomWidgetConfiguration, in context: Context) async -> Timeline<RoomEntry> {
         guard Glim.remote.isPaired else {
             return Timeline(entries: [RoomEntry(isPaired: false)], policy: .after(.now.addingTimeInterval(3600)))
         }
-        let entry = RoomEntry(snapshot: await Glim.remote.currentSnapshot(), roomID: configuration.room?.id)
+        let entry = RoomEntry(
+            snapshot: await Glim.remote.currentSnapshot(), roomID: configuration.room?.id,
+            sceneIDs: configuration.scenes ?? [])
         return Timeline(entries: [entry], policy: .after(.now.addingTimeInterval(15 * 60)))
     }
 }
@@ -105,8 +144,8 @@ struct RoomWidget: Widget {
                 .environment(\.colorScheme, .dark)
         }
         .configurationDisplayName("Room")
-        .description("Turn a room on or off and recall its scenes.")
-        .supportedFamilies([.systemSmall, .systemMedium])
+        .description("Turn a room on or off, set its brightness and recall its scenes.")
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
     }
 }
 
@@ -144,10 +183,10 @@ struct RoomWidgetView: View {
 
     var body: some View {
         if let room = entry.room, entry.isPaired {
-            if family == .systemMedium {
-                medium(room)
-            } else {
-                small(room)
+            switch family {
+            case .systemMedium: medium(room)
+            case .systemLarge: large(room)
+            default: small(room)
             }
         } else {
             VStack(spacing: 6) {
@@ -158,80 +197,137 @@ struct RoomWidgetView: View {
         }
     }
 
-    /// The whole widget switches the room; the bar at the bottom shows its brightness.
+    /// The top switches the room; tapping the bar at the bottom sets its brightness.
     private func small(_ room: RoomEntity) -> some View {
-        Button(intent: SetRoomPowerIntent(room: room, on: !entry.isOn)) {
-            VStack(alignment: .leading, spacing: 2) {
-                powerDot(size: 44)
-                Spacer(minLength: 0)
-                Text(room.name).font(.system(size: 17, weight: .bold)).lineLimit(2).minimumScaleFactor(0.8)
-                Text(entry.status).font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.8))
-                    .lineLimit(1)
-                LevelBar(entry: entry) {
-                    Text(entry.levelText).font(.system(size: 13, weight: .bold)).monospacedDigit()
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                        .padding(.trailing, 10)
-                }
-                .frame(height: 28)
-                .padding(.top, 6)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            .contentShape(.rect)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(room.name), \(entry.levelText)")
-    }
-
-    /// The app's room row, with the room's scenes under it.
-    private func medium(_ room: RoomEntity) -> some View {
-        VStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             Button(intent: SetRoomPowerIntent(room: room, on: !entry.isOn)) {
-                LevelBar(entry: entry) {
-                    HStack(spacing: 10) {
-                        powerDot(size: 40)
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text(room.name).font(.system(size: 16, weight: .bold)).lineLimit(1)
-                            Text(entry.status).font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.8)).lineLimit(1)
-                        }
-                        Spacer(minLength: 6)
-                        Text(entry.levelText).font(.system(size: 16, weight: .bold)).monospacedDigit()
-                    }
-                    .padding(.leading, 6)
-                    .padding(.trailing, 16)
+                VStack(alignment: .leading, spacing: 2) {
+                    powerDot(size: 44)
+                    Spacer(minLength: 0)
+                    Text(room.name).font(.system(size: 17, weight: .bold)).lineLimit(2).minimumScaleFactor(0.8)
+                    Text(entry.status).font(.system(size: 13, weight: .medium)).foregroundStyle(.white.opacity(0.8))
+                        .lineLimit(1)
                 }
-                .frame(height: 52)
-                .contentShape(.capsule)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                .contentShape(.rect)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("\(room.name), \(entry.levelText)")
 
+            LevelBar(entry: entry) {
+                Text(entry.levelText).font(.system(size: 13, weight: .bold)).monospacedDigit()
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.trailing, 10)
+            }
+            .overlay { levelTaps(room) }
+            .frame(height: 32)
+        }
+    }
+
+    private func medium(_ room: RoomEntity) -> some View {
+        VStack(spacing: 10) {
+            row(room, height: 52, dot: 40)
             if entry.scenes.isEmpty {
                 Spacer(minLength: 0)
             } else {
                 HStack(alignment: .top, spacing: 4) {
-                    ForEach(entry.scenes.prefix(4)) { scene in
-                        Button(intent: ActivateSceneIntent(scene: scene.entity)) {
-                            VStack(spacing: 4) {
-                                Circle()
-                                    .fill(scene.color)
-                                    .frame(width: 34, height: 34)
-                                    .padding(3)
-                                    .overlay {
-                                        if scene.isActive { Circle().strokeBorder(Color.vero, lineWidth: 2) }
-                                    }
-                                Text(scene.name)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(scene.isActive ? Color.vero : .white.opacity(0.8))
-                                    .lineLimit(1)
-                            }
-                            .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.plain)
-                    }
+                    ForEach(entry.scenes.prefix(4)) { sceneButton($0, size: 34) }
                 }
             }
         }
+    }
+
+    private func large(_ room: RoomEntity) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            row(room, height: 60, dot: 46)
+            if entry.scenes.isEmpty {
+                Text("This room has no scenes.").font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.6))
+            } else {
+                Text("Scenes").font(.system(size: 13, weight: .bold)).tracking(1).textCase(.uppercase)
+                    .foregroundStyle(.white.opacity(0.6))
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 4), spacing: 12) {
+                    ForEach(entry.scenes.prefix(8)) { sceneButton($0, size: 44) }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// The app's room row: the power button, then a bar that sets the brightness where it is tapped.
+    private func row(_ room: RoomEntity, height: CGFloat, dot: CGFloat) -> some View {
+        LevelBar(entry: entry) {
+            HStack(spacing: 10) {
+                Color.clear.frame(width: dot)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(room.name).font(.system(size: 16, weight: .bold)).lineLimit(1)
+                    Text(entry.status).font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.8)).lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                Text(entry.levelText).font(.system(size: 16, weight: .bold)).monospacedDigit()
+            }
+            .padding(.leading, 6)
+            .padding(.trailing, 16)
+        }
+        .overlay { levelTaps(room).padding(.leading, dot + 12) }
+        .overlay(alignment: .leading) {
+            Button(intent: SetRoomPowerIntent(room: room, on: !entry.isOn)) { powerDot(size: dot) }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(room.name), \(entry.levelText)")
+                .padding(.leading, 6)
+        }
+        .frame(height: height)
+    }
+
+    /// Brightness levels a tap on the bar sets, one per equal part of it, left to right.
+    static let levels = [5, 25, 50, 75, 100]
+
+    /// Invisible buttons across the bar; an on/off device gets one that switches it.
+    @ViewBuilder
+    private func levelTaps(_ room: RoomEntity) -> some View {
+        if entry.isDimmable {
+            HStack(spacing: 0) {
+                ForEach(Array(Self.levels.enumerated()), id: \.offset) { index, level in
+                    Button(intent: SetRoomBrightnessIntent(room: room, brightness: level)) {
+                        Rectangle().fill(.white.opacity(0.001))
+                            .overlay(alignment: .trailing) {
+                                if index < Self.levels.count - 1 {
+                                    Rectangle().fill(.white.opacity(0.10)).frame(width: 1).padding(.vertical, 8)
+                                }
+                            }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(room.name) at \(level)%")
+                }
+            }
+        } else {
+            Button(intent: SetRoomPowerIntent(room: room, on: !entry.isOn)) {
+                Rectangle().fill(.white.opacity(0.001))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(entry.isOn ? "Turn \(room.name) off" : "Turn \(room.name) on")
+        }
+    }
+
+    private func sceneButton(_ scene: RoomEntry.SceneItem, size: CGFloat) -> some View {
+        Button(intent: ActivateSceneIntent(scene: scene.entity)) {
+            VStack(spacing: 4) {
+                Circle()
+                    .fill(scene.color)
+                    .frame(width: size, height: size)
+                    .padding(3)
+                    .overlay {
+                        if scene.isActive { Circle().strokeBorder(Color.vero, lineWidth: 2) }
+                    }
+                Text(scene.name)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(scene.isActive ? Color.vero : .white.opacity(0.8))
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.plain)
     }
 
     private func powerDot(size: CGFloat) -> some View {
