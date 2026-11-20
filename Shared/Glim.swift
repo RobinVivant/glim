@@ -13,10 +13,35 @@ enum Glim {
         WidgetCenter.shared.reloadAllTimelines()
         ControlCenter.shared.reloadAllControls()
     }
+
+    static func groupURL(_ id: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = "glim"
+        components.host = "group"
+        components.path = "/\(id)"
+        return components.url
+    }
+
+    static func groupID(from url: URL) -> String? {
+        guard url.scheme == "glim", url.host == "group" else { return nil }
+        let id = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return id.isEmpty ? nil : id
+    }
 }
 
 extension RGB {
     var color: Color { Color(red: r, green: g, blue: b) }
+}
+
+extension LightScene {
+    var swatch: AnyShapeStyle {
+        let colors = swatches.map(\.color)
+        switch colors.count {
+        case 0: return AnyShapeStyle(Color.glow)
+        case 1: return AnyShapeStyle(colors[0])
+        default: return AnyShapeStyle(AngularGradient(colors: colors + [colors[0]], center: .center))
+        }
+    }
 }
 
 extension Color {

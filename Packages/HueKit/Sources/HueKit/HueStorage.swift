@@ -19,6 +19,7 @@ public struct HueStorage: Sendable {
 
     private var credentialsURL: URL { directory.appending(path: "bridge.json") }
     private var snapshotURL: URL { directory.appending(path: "home.json") }
+    private var lastWriteURL: URL { directory.appending(path: "last-write") }
 
     public func loadCredentials() -> BridgeCredentials? {
         guard let data = try? Data(contentsOf: credentialsURL) else { return nil }
@@ -29,9 +30,14 @@ public struct HueStorage: Sendable {
         try write(JSONEncoder().encode(credentials), to: credentialsURL)
     }
 
+    public func deleteSnapshot() {
+        try? FileManager.default.removeItem(at: snapshotURL)
+        try? FileManager.default.removeItem(at: lastWriteURL)
+    }
+
     public func deleteAll() {
         try? FileManager.default.removeItem(at: credentialsURL)
-        try? FileManager.default.removeItem(at: snapshotURL)
+        deleteSnapshot()
     }
 
     public func loadSnapshot() -> HomeSnapshot? {
@@ -44,6 +50,17 @@ public struct HueStorage: Sendable {
     public func saveSnapshot(_ snapshot: HomeSnapshot) {
         guard let data = try? JSONValue.array(snapshot.resources).data() else { return }
         try? write(data, to: snapshotURL)
+    }
+
+    public func markRemoteWrite() {
+        try? write(Data([1]), to: lastWriteURL)
+    }
+
+    public var secondsSinceRemoteWrite: TimeInterval? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: lastWriteURL.path(percentEncoded: false)),
+            let modified = attributes[.modificationDate] as? Date
+        else { return nil }
+        return Date().timeIntervalSince(modified)
     }
 
     /// Readable after the first unlock, because Lock Screen controls run while the phone is locked.

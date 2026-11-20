@@ -4,56 +4,72 @@ import SwiftUI
 struct HomeView: View {
     let store: HomeStore
 
+    @Environment(AppModel.self) private var model
     @State private var openGroup: LightGroup?
     @State private var expandedGroup: String?
     @State private var showsSettings = false
+
+    private static let nightSceneNames: Set<String> = [
+        "nightlight", "night light", "veilleuse", "nachtlicht", "luz nocturna", "luce notturna",
+    ]
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 LazyVStack(spacing: 10) {
                     header
-                    ForEach(store.snapshot.groups) { group in
-                        GroupRow(
-                            group: group,
-                            state: store.snapshot.state(of: group),
-                            scenes: store.snapshot.scenes(in: group),
-                            lights: store.snapshot.lights(in: group).map {
-                                LightEntry(light: $0, isReachable: store.snapshot.isReachable($0))
-                            },
-                            isExpanded: expandedGroup == group.id,
-                            onPower: { store.setGroup(group, on: $0) },
-                            onBrightness: { store.setGroup(group, brightness: $0) },
-                            onScene: { store.recall($0) },
-                            onLight: { store.setLight($0, on: $1) },
-                            onExpand: {
-                                Haptics.tap()
-                                withAnimation(.snappy(duration: 0.28)) {
-                                    expandedGroup = expandedGroup == group.id ? nil : group.id
-                                }
-                            },
-                            onOpen: { openGroup = group }
-                        )
-                        .equatable()
+                    ForEach(rooms) { groupRow(for: $0) }
+                    if !zones.isEmpty {
+                        Text("Zones")
+                            .sectionLabel()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 8)
+                            .padding(.top, 10)
+                        ForEach(zones) { groupRow(for: $0) }
                     }
                 }
                 .padding(.horizontal, 12)
-                .padding(.bottom, 16)
+                .padding(.bottom, 24)
+            }
+            .refreshable {
+                store.reconnect()
             }
             .background { AmbientGlow(spots: glowSpots) }
             .background(Color.black)
             .overlay {
                 if store.snapshot.groups.isEmpty {
-                    if store.connection == .live {
+                    switch store.connection {
+                    case .live:
                         ContentUnavailableView(
                             "No rooms", systemImage: "lightbulb.slash",
                             description: Text("This bridge has no rooms or zones yet."))
-                    } else {
+                    case .offline(let reason):
+                        ContentUnavailableView {
+                            Label("Bridge unreachable", systemImage: "wifi.exclamationmark")
+                        } description: {
+                            Text(reason)
+                        } actions: {
+                            Button("Retry") { store.reconnect() }
+                                .buttonStyle(.borderedProminent)
+                        }
+                    case .connecting:
                         ProgressView()
                     }
                 }
             }
-            .safeAreaInset(edge: .bottom) { bottomBar }
+            .safeAreaInset(edge: .bottom) {
+                bottomBar
+                    .background(alignment: .bottom) {
+                        LinearGradient(
+                            colors: [.clear, .black.opacity(0.7), .black.opacity(0.95), .black],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(height: 128)
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
+                    }
+            }
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(item: $openGroup) { group in
                 GroupDetailView(store: store, groupID: group.id)
@@ -61,10 +77,53 @@ struct HomeView: View {
             .sheet(isPresented: $showsSettings) {
                 SettingsView(store: store)
             }
+            .onChange(of: model.pendingGroupID, initial: true) { _, _ in
+                openPendingGroupIfAvailable()
+            }
+            .onChange(of: store.snapshot.groups) { _, _ in
+                openPendingGroupIfAvailable()
+            }
+            .onChange(of: shortcutSignature, initial: true) { _, _ in
+                GlimShortcuts.updateAppShortcutParameters()
+            }
         }
     }
 
-    private var rooms: [LightGroup] { store.snapshot.groups.filter { $0.kind != .zone } }
+    private func groupRow(for group: LightGroup) -> some View {
+        GroupRow(
+            group: group,
+            state: store.snapshot.state(of: group),
+            scenes: store.snapshot.scenes(in: group),
+            lights: store.snapshot.lights(in: group).map {
+                LightEntry(light: $0, isReachable: store.snapshot.isReachable($0))
+            },
+            isExpanded: expandedGroup == group.id,
+            onPower: { store.setGroup(group, on: $0) },
+            onBrightness: { store.setGroup(group, brightness: $0) },
+            onScene: { store.recall($0) },
+            onLight: { store.setLight($0, on: $1) },
+            onExpand: {
+                Haptics.tap()
+                withAnimation(.snappy(duration: 0.28)) {
+                    expandedGroup = expandedGroup == group.id ? nil : group.id
+                }
+            },
+            onOpen: { openGroup = group }
+        )
+        .equatable()
+    }
+
+    private func openPendingGroupIfAvailable() {
+        guard let groupID = model.pendingGroupID, let group = store.snapshot.group(groupID) else { return }
+        openGroup = group
+        model.pendingGroupID = nil
+    }
+
+    private var rooms: [LightGroup] { store.snapshot.groups.filter { $0.kind == .room } }
+    private var zones: [LightGroup] { store.snapshot.groups.filter { $0.kind == .zone } }
+    private var shortcutSignature: [String] {
+        store.snapshot.groups.map(\.id) + store.snapshot.scenes.keys.sorted()
+    }
 
     private var header: some View {
         HStack(alignment: .bottom) {
@@ -94,9 +153,12 @@ struct HomeView: View {
     }
 
     private var summary: String {
-        let lit = rooms.filter { store.snapshot.state(of: $0).isOn && store.snapshot.state(of: $0).isReachable }.count
+        let lit = rooms.filter {
+            let state = store.snapshot.state(of: $0)
+            return state.isOn && state.isReachable && state.lightsOn > 0
+        }.count
         switch lit {
-        case 0: return "Everything off"
+        case 0: return store.snapshot.anyReachableLightOn ? "Lights on" : "Everything off"
         case 1: return "1 room on"
         default: return "\(lit) rooms on"
         }
@@ -111,10 +173,12 @@ struct HomeView: View {
         }
     }
 
-    /// Rooms that have a scene called Nightlight, each with that scene.
+    /// Rooms that have a Nightlight scene, each with that scene.
     private var nightScenes: [LightScene] {
         rooms.compactMap { group in
-            store.snapshot.scenes(in: group).first { $0.name.localizedCaseInsensitiveCompare("Nightlight") == .orderedSame }
+            store.snapshot.scenes(in: group).first {
+                Self.nightSceneNames.contains($0.name.lowercased())
+            }
         }
     }
 
@@ -128,7 +192,7 @@ struct HomeView: View {
                     .glass(in: Capsule())
             }
             HStack(spacing: 6) {
-                let anyOn = store.snapshot.anyLightOn
+                let anyOn = store.snapshot.anyReachableLightOn
                 Button {
                     Haptics.click()
                     store.setAll(on: false)
@@ -200,8 +264,14 @@ struct GroupRow: View, Equatable {
         VStack(spacing: 0) {
             ZStack {
                 BrightnessSurface(
-                    value: state.brightness, isOn: state.isOn, tint: tint, isDimmable: state.isDimmable,
-                    accessibilityName: group.name, onChange: onBrightness, onTap: onExpand
+                    value: state.brightness,
+                    isOn: isLit,
+                    tint: tint,
+                    isDimmable: state.isDimmable,
+                    isEnabled: state.isReachable,
+                    accessibilityName: group.name,
+                    onChange: onBrightness,
+                    onTap: onExpand
                 ) { shown in
                     HStack(spacing: 8) {
                         VStack(alignment: .leading, spacing: 1) {
@@ -220,7 +290,8 @@ struct GroupRow: View, Equatable {
                 .accessibilityHint(state.isDimmable ? "Slide to dim. Opens scenes and lights." : "Opens scenes and lights.")
 
                 HStack {
-                    PowerButton(isOn: state.isOn, tint: tint) { onPower(!state.isOn) }
+                    PowerButton(isOn: isLit, tint: tint) { onPower(!isLit) }
+                        .disabled(!state.isReachable)
                         .accessibilityIdentifier("power-\(group.name)")
                     Spacer()
                     Button(action: onExpand) {
@@ -238,6 +309,7 @@ struct GroupRow: View, Equatable {
                 .padding(.trailing, 6)
             }
             .frame(height: 68)
+            .clipShape(.capsule)
 
             if isExpanded {
                 details.transition(.opacity)
@@ -253,17 +325,19 @@ struct GroupRow: View, Equatable {
             if !scenes.isEmpty {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 4), spacing: 12) {
                     ForEach(scenes) { scene in
-                        SceneDot(scene: scene) { onScene(scene) }
+                        SceneDot(scene: scene, isActive: isLit && scene.isActive) { onScene(scene) }
                             .accessibilityIdentifier("scene-\(group.name)-\(scene.name)")
                     }
                 }
             }
-            FlowLayout(spacing: 8) {
-                ForEach(lights, id: \.light.id) { entry in
-                    LightChip(light: entry.light, isReachable: entry.isReachable) {
-                        onLight(entry.light, !entry.light.isOn)
+            if !lights.isEmpty {
+                FlowLayout(spacing: 8) {
+                    ForEach(lights, id: \.light.id) { entry in
+                        LightChip(light: entry.light, isReachable: entry.isReachable) {
+                            onLight(entry.light, !entry.light.isOn)
+                        }
+                        .accessibilityIdentifier("chip-\(entry.light.name)")
                     }
-                    .accessibilityIdentifier("chip-\(entry.light.name)")
                 }
             }
             Button(action: onOpen) {
@@ -281,19 +355,17 @@ struct GroupRow: View, Equatable {
         .padding(.horizontal, 16)
         .padding(.top, 14)
         .padding(.bottom, 18)
-        .overlay(alignment: .top) { Rectangle().fill(.white.opacity(0.08)).frame(height: 1) }
     }
 
     private func level(_ shown: Double) -> String {
         if !state.isReachable { return "" }
-        if !state.isDimmable { return state.isOn ? "On" : "Off" }
+        if !state.isDimmable { return isLit ? "On" : "Off" }
         return shown >= 1 ? "\(Int(shown.rounded()))%" : "Off"
     }
 
     private var subtitle: String {
-        let kind = group.kind == .zone ? "Zone · " : ""
-        if !state.isReachable { return kind + "Unreachable, check its power" }
-        if !isLit { return kind + "Off" }
+        if !state.isReachable { return "Unreachable, check its power" }
+        if !isLit { return "Off" }
         let active = scenes.first(where: \.isActive).map { $0.name + " · " } ?? ""
         let count: String
         if state.lightsOn == state.lightCount {
@@ -301,7 +373,7 @@ struct GroupRow: View, Equatable {
         } else {
             count = "\(state.lightsOn) of \(state.lightCount) on"
         }
-        return kind + active + count
+        return active + count
     }
 }
 

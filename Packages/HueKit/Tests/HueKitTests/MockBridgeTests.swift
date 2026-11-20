@@ -52,6 +52,11 @@ struct MockBridgeTests {
         #expect(afterScene.scenes[movie.id]?.isActive == true)
         #expect(afterScene.state(of: living).brightness == 25)
 
+        let sofa = try #require(afterScene.lights(in: living).first { $0.name == "Sofa lamp" })
+        try await remote.setLight(sofa.id, on: false)
+        #expect(remote.cachedSnapshot().lights[sofa.id]?.isOn == false)
+        #expect(await remote.currentSnapshot().lights[sofa.id]?.isOn == false)
+
         try await remote.setAll(on: false)
         #expect(await remote.currentSnapshot().anyLightOn == false)
     }
@@ -93,7 +98,7 @@ struct MockBridgeTests {
         #expect(try await HueClient(credentials: credentials).fetchResources().isEmpty == false)
 
         credentials.certificatePin = "c29tZW9uZSBlbHNl"
-        await #expect(throws: (any Error).self) {
+        await #expect(throws: HueError.certificateChanged) {
             try await HueClient(credentials: credentials).fetchResources()
         }
     }

@@ -22,7 +22,8 @@ public struct Light: Identifiable, Hashable, Sendable {
         isOn = json["on"]?["on"]?.bool ?? false
         brightness = json["dimming"]?["brightness"]?.double
         let temperature = json["color_temperature"]
-        mirek = temperature?["mirek"]?.int
+        let mirekValid = temperature?["mirek_valid"]?.bool != false
+        mirek = mirekValid ? temperature?["mirek"]?.int : nil
         if let low = temperature?["mirek_schema"]?["mirek_minimum"]?.int,
             let high = temperature?["mirek_schema"]?["mirek_maximum"]?.int, low <= high
         {
@@ -77,9 +78,13 @@ public struct LightScene: Identifiable, Hashable, Sendable {
         for entry in json["actions"]?.array ?? [] {
             guard let action = entry["action"], action["on"]?["on"]?.bool != false else { continue }
             if let color = LightScene.color(in: action) { colors.append(color) }
+            for point in action["gradient"]?["points"]?.array ?? [] {
+                if let color = LightScene.color(in: point) { colors.append(color) }
+            }
         }
         if colors.isEmpty {
-            for entry in json["palette"]?["color"]?.array ?? [] {
+            let palette = (json["palette"]?["color"]?.array ?? []) + (json["palette"]?["color_temperature"]?.array ?? [])
+            for entry in palette {
                 if let color = LightScene.color(in: entry) { colors.append(color) }
             }
         }

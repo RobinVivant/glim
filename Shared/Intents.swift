@@ -57,10 +57,52 @@ struct SceneQuery: EntityStringQuery {
 
     func suggestedEntities() async throws -> [SceneEntity] { all() }
 
+    func defaultResult() async -> SceneEntity? { all().first }
+
     private func all() -> [SceneEntity] {
         let snapshot = Glim.remote.cachedSnapshot()
         return snapshot.groups.flatMap { group in
             snapshot.scenes(in: group).map { SceneEntity(id: $0.id, name: $0.name, roomName: group.name) }
+        }
+    }
+}
+
+struct LightEntity: AppEntity {
+    static let typeDisplayRepresentation: TypeDisplayRepresentation = "Light"
+    static let defaultQuery = LightQuery()
+
+    let id: String
+    let name: String
+    let roomName: String
+
+    var displayRepresentation: DisplayRepresentation {
+        DisplayRepresentation(title: "\(name)", subtitle: "\(roomName)")
+    }
+}
+
+struct LightQuery: EntityStringQuery {
+    func entities(for identifiers: [String]) async throws -> [LightEntity] {
+        all().filter { identifiers.contains($0.id) }
+    }
+
+    func entities(matching string: String) async throws -> [LightEntity] {
+        all().filter {
+            $0.name.localizedCaseInsensitiveContains(string) || $0.roomName.localizedCaseInsensitiveContains(string)
+        }
+    }
+
+    func suggestedEntities() async throws -> [LightEntity] { all() }
+
+    func defaultResult() async -> LightEntity? { all().first }
+
+    private func all() -> [LightEntity] {
+        let snapshot = Glim.remote.cachedSnapshot()
+        var seen = Set<String>()
+        return snapshot.groups.filter { $0.kind == .room }.flatMap { group in
+            snapshot.lights(in: group).compactMap { light in
+                guard seen.insert(light.id).inserted else { return nil }
+                return LightEntity(id: light.id, name: light.name, roomName: group.name)
+            }
         }
     }
 }
@@ -124,6 +166,27 @@ struct SetRoomBrightnessIntent: AppIntent {
 
     func perform() async throws -> some IntentResult {
         try await Glim.remote.setGroup(room.id, brightness: Double(brightness))
+        Glim.reloadWidgets()
+        return .result()
+    }
+}
+
+struct SetLightPowerIntent: SetValueIntent {
+    static let title: LocalizedStringResource = "Turn Light On or Off"
+    static let description = IntentDescription("Turns a single light on or off.")
+
+    @Parameter(title: "Light") var light: LightEntity
+    @Parameter(title: "On") var value: Bool
+
+    init() {}
+
+    init(light: LightEntity, on: Bool = true) {
+        self.light = light
+        self.value = on
+    }
+
+    func perform() async throws -> some IntentResult {
+        try await Glim.remote.setLight(light.id, on: value)
         Glim.reloadWidgets()
         return .result()
     }

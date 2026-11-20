@@ -21,12 +21,17 @@ public struct HomeSnapshot: Sendable, Equatable {
 
     public init() {}
 
-    public init(resources: [JSONValue]) {
+    public init(resources: [JSONValue], preserving heldIDs: Set<String> = [], from previous: HomeSnapshot? = nil) {
         for resource in resources {
             guard let id = resource["id"]?.string, let type = resource["type"]?.string,
                 HomeSnapshot.keptTypes.contains(type)
             else { continue }
             raw[id] = resource
+        }
+        if let previous {
+            for id in heldIDs where raw[id] != nil {
+                if let kept = previous.raw[id] { raw[id] = kept }
+            }
         }
         for (id, resource) in raw { indexLeaf(id: id, resource: resource) }
         rebuildStructure()
@@ -46,7 +51,52 @@ public struct HomeSnapshot: Sendable, Equatable {
 
     public func scenes(in group: LightGroup) -> [LightScene] { scenesByGroup[group.id] ?? [] }
 
+    public func activeScene(in group: LightGroup) -> LightScene? { scenes(in: group).first(where: \.isActive) }
+
     public func isReachable(_ light: Light) -> Bool { !unreachableDevices.contains(light.deviceID) }
+
+    public func mirekRange(for group: LightGroup) -> ClosedRange<Int>? {
+        let ranges = lights(in: group).compactMap(\.mirekRange)
+        guard let first = ranges.first else { return nil }
+        let low = ranges.map(\.lowerBound).max() ?? first.lowerBound
+        let high = ranges.map(\.upperBound).min() ?? first.upperBound
+        if low <= high { return low...high }
+        let unionLow = ranges.map(\.lowerBound).min() ?? 153
+        let unionHigh = ranges.map(\.upperBound).max() ?? 500
+        return unionLow...unionHigh
+    }
+
+    public func clampedMirek(_ mirek: Int, for light: Light) -> Int {
+        guard let range = light.mirekRange else { return mirek }
+        return min(max(mirek, range.lowerBound), range.upperBound)
+    }
+
+    public func clampedMirek(_ mirek: Int, for group: LightGroup) -> Int {
+        let range = mirekRange(for: group) ?? 153...500
+        return min(max(mirek, range.lowerBound), range.upperBound)
+    }
+
+    public func relatedHoldIDs(for group: LightGroup) -> [String] {
+        let targetLights = Set(group.lightIDs)
+        var ids = targetLights
+        ids.insert(group.groupedLightID)
+        if let homeGroupedLightID { ids.insert(homeGroupedLightID) }
+        for other in groups where other.id == group.id || !targetLights.isDisjoint(with: other.lightIDs) {
+            ids.insert(other.groupedLightID)
+            for scene in scenes(in: other) { ids.insert(scene.id) }
+        }
+        return Array(ids)
+    }
+
+    public func relatedHoldIDs(forLight lightID: String) -> [String] {
+        var ids: Set<String> = [lightID]
+        if let homeGroupedLightID { ids.insert(homeGroupedLightID) }
+        for group in groups where group.lightIDs.contains(lightID) {
+            ids.insert(group.groupedLightID)
+            for scene in scenes(in: group) { ids.insert(scene.id) }
+        }
+        return Array(ids)
+    }
 
     public func state(of group: LightGroup) -> GroupState {
         let members = lights(in: group)
@@ -68,6 +118,10 @@ public struct HomeSnapshot: Sendable, Equatable {
     public var anyLightOn: Bool {
         if let id = homeGroupedLightID, let home = groupedLights[id] { return home.isOn }
         return lights.values.contains(where: \.isOn)
+    }
+
+    public var anyReachableLightOn: Bool {
+        lights.values.contains { $0.isOn && isReachable($0) }
     }
 
     // MARK: Changes from the bridge
@@ -112,6 +166,39 @@ public struct HomeSnapshot: Sendable, Equatable {
         settleGroupedLights()
     }
 
+    public mutating func setGroupLocally(_ group: LightGroup, mirek: Int) {
+        let clamped = clampedMirek(mirek, for: group)
+        for id in group.lightIDs {
+            if let light = lights[id], light.mirekRange != nil {
+                let value = clampedMirek(clamped, for: light)
+                merge(
+                    id: id,
+                    patch: HomeSnapshot.asLightReports([
+                        "on": ["on": true],
+                        "color_temperature": ["mirek": .number(Double(value))],
+                    ]))
+            } else {
+                merge(id: id, patch: ["on": ["on": true]])
+            }
+        }
+        settleGroupedLights()
+    }
+
+    public mutating func setGroupLocally(_ group: LightGroup, color: XY) {
+        let patch: JSONValue = [
+            "on": ["on": true],
+            "color": ["xy": ["x": .number(color.x), "y": .number(color.y)]],
+        ]
+        for id in group.lightIDs {
+            if lights[id]?.xy != nil {
+                merge(id: id, patch: HomeSnapshot.asLightReports(patch))
+            } else {
+                merge(id: id, patch: ["on": ["on": true]])
+            }
+        }
+        settleGroupedLights()
+    }
+
     public mutating func setLightLocally(id: String, patch: JSONValue) {
         merge(id: id, patch: HomeSnapshot.asLightReports(patch))
         settleGroupedLights()
@@ -120,8 +207,13 @@ public struct HomeSnapshot: Sendable, Equatable {
     /// A light told to show a color stops reporting a white point; mirror that
     /// so the light draws in its new color before the bridge confirms.
     private static func asLightReports(_ command: JSONValue) -> JSONValue {
-        guard command["color"] != nil, command["color_temperature"] == nil else { return command }
-        return command.merging(["color_temperature": ["mirek": .null]])
+        if command["color"] != nil, command["color_temperature"] == nil {
+            return command.merging(["color_temperature": ["mirek": .null, "mirek_valid": false]])
+        }
+        if command["color_temperature"]?["mirek"]?.int != nil {
+            return command.merging(["color_temperature": ["mirek_valid": true]])
+        }
+        return command
     }
 
     /// Shows a scene as recalled: its lights take the scene's values at once.
@@ -156,7 +248,15 @@ public struct HomeSnapshot: Sendable, Equatable {
             }
             merge(id: groupedLightID, patch: patch)
         }
-        for group in groups { settle(group.groupedLightID, members: lights(in: group)) }
+        for group in groups {
+            let members = lights(in: group)
+            settle(group.groupedLightID, members: members)
+            if !members.contains(where: \.isOn) {
+                for scene in scenesByGroup[group.id] ?? [] where scene.isActive {
+                    merge(id: scene.id, patch: ["status": ["active": "inactive"]])
+                }
+            }
+        }
         if let home = homeGroupedLightID { settle(home, members: Array(lights.values)) }
     }
 
@@ -175,7 +275,14 @@ public struct HomeSnapshot: Sendable, Equatable {
         indexLeaf(id: id, resource: resource)
         switch resource["type"]?.string {
         case "scene": rebuildScenes()
-        case "light", "grouped_light": break
+        case "light": break
+        case "grouped_light":
+            if groupedLights[id]?.ownerType == "bridge_home" { homeGroupedLightID = id }
+        case "device":
+            for (lightID, light) in lights where light.deviceID == id {
+                if let lightResource = raw[lightID] { indexLeaf(id: lightID, resource: lightResource) }
+            }
+            rebuildStructure()
         default: rebuildStructure()
         }
     }

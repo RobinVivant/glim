@@ -1,5 +1,6 @@
 import HueKit
 import SwiftUI
+import UIKit
 
 /// A room or zone in full: every scene, color for the whole group, and each light.
 struct GroupDetailView: View {
@@ -18,29 +19,52 @@ struct GroupDetailView: View {
 
     private func content(_ group: LightGroup) -> some View {
         let state = store.snapshot.state(of: group)
+        let isLit = state.isOn && state.isReachable && state.lightsOn > 0
         let scenes = store.snapshot.scenes(in: group)
         let lights = store.snapshot.lights(in: group)
         let tint = state.tint?.color ?? .glow
+        let litWithMirek = lights.filter { $0.isOn && $0.mirek != nil }
+        let selectedMirek = litWithMirek.count == 1 ? litWithMirek.first?.mirek : nil
 
         return ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                HStack(spacing: 12) {
-                    if state.isDimmable {
-                        BrightnessBar(value: state.brightness, isOn: state.isOn, tint: tint, height: 56) {
-                            store.setGroup(group, brightness: $0)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 12) {
+                        PowerButton(isOn: isLit, tint: tint, size: 52) { store.setGroup(group, on: !isLit) }
+                            .disabled(!state.isReachable)
+                        if state.isDimmable {
+                            BrightnessBar(
+                                value: state.brightness,
+                                isOn: isLit,
+                                tint: tint,
+                                height: 52,
+                                isEnabled: state.isReachable,
+                                accessibilityName: group.name
+                            ) {
+                                store.setGroup(group, brightness: $0)
+                            }
+                        } else {
+                            Text(isLit ? "On" : "Off").font(.system(size: 22, weight: .heavy))
+                            Spacer()
                         }
-                    } else {
-                        Text(state.isOn ? "On" : "Off").font(.system(size: 22, weight: .heavy))
-                        Spacer()
                     }
-                    PowerButton(isOn: state.isOn, tint: tint, size: 56) { store.setGroup(group, on: !state.isOn) }
+                    if !state.isReachable {
+                        Text("Unreachable, check its power")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.6))
+                    }
                 }
+                .padding(.horizontal, 16)
 
                 if lights.contains(where: { $0.mirekRange != nil || $0.xy != nil }) {
-                    section("Color") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Color").sectionLabel().padding(.horizontal, 16)
                         PaletteStrip(
                             showsWhites: lights.contains { $0.mirekRange != nil },
                             showsColors: lights.contains { $0.xy != nil },
+                            mirekRange: store.snapshot.mirekRange(for: group),
+                            selectedMirek: selectedMirek,
+                            horizontalPadding: 16,
                             onMirek: { store.setGroup(group, mirek: $0) },
                             onColor: { store.setGroup(group, color: $0) }
                         )
@@ -51,39 +75,44 @@ struct GroupDetailView: View {
                     section("Scenes") {
                         FlowLayout(spacing: 8) {
                             ForEach(scenes) { scene in
-                                SceneChip(scene: scene) { store.recall(scene) }
+                                SceneChip(scene: scene, isActive: isLit && scene.isActive) { store.recall(scene) }
                             }
                         }
                     }
+                    .padding(.horizontal, 16)
                 }
 
-                section("Lights") {
-                    VStack(spacing: 8) {
-                        ForEach(lights) { light in
-                            LightRow(
-                                light: light,
-                                isReachable: store.snapshot.isReachable(light),
-                                onPower: { store.setLight(light, on: $0) },
-                                onBrightness: { store.setLight(light, brightness: $0) },
-                                onColor: { colorLight = light }
-                            )
+                if !lights.isEmpty {
+                    section("Lights") {
+                        VStack(spacing: 8) {
+                            ForEach(lights) { light in
+                                LightRow(
+                                    light: light,
+                                    isReachable: store.snapshot.isReachable(light),
+                                    onPower: { store.setLight(light, on: $0) },
+                                    onBrightness: { store.setLight(light, brightness: $0) },
+                                    onColor: { colorLight = light }
+                                )
+                            }
                         }
                     }
+                    .padding(.horizontal, 16)
                 }
             }
-            .padding(16)
+            .padding(.vertical, 16)
         }
         .background {
             AmbientGlow(spots: [
-                AmbientGlow.Spot(color: tint, opacity: state.isOn && state.isReachable ? 0.25 + state.brightness / 100 * 0.3 : 0)
+                AmbientGlow.Spot(color: tint, opacity: isLit ? 0.25 + state.brightness / 100 * 0.3 : 0)
             ])
         }
         .background(Color.black)
         .navigationTitle(group.name)
         .navigationBarTitleDisplayMode(.inline)
         .sheet(item: $colorLight) { opened in
-            LightColorSheet(store: store, light: store.snapshot.lights[opened.id] ?? opened)
-                .presentationDetents([.height(260)])
+            let current = store.snapshot.lights[opened.id] ?? opened
+            LightColorSheet(store: store, light: current)
+                .presentationDetents([.height(current.xy != nil ? 320 : 250)])
         }
     }
 
@@ -107,15 +136,23 @@ struct LightRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Button(action: onColor) {
                     Circle()
-                        .fill(light.isOn ? AnyShapeStyle(tint) : AnyShapeStyle(.white.opacity(0.12)))
-                        .frame(width: 28, height: 28)
+                        .fill(light.isOn && isReachable ? AnyShapeStyle(tint) : AnyShapeStyle(.white.opacity(0.12)))
+                        .frame(width: 24, height: 24)
                         .overlay(Circle().strokeBorder(.white.opacity(0.25), lineWidth: 0.5))
+                        .padding(3)
+                        .overlay {
+                            if hasColorControls {
+                                Circle().strokeBorder(tint.opacity(light.isOn ? 0.45 : 0.6), lineWidth: 1.5)
+                            }
+                        }
+                        .frame(width: 40, height: 40)
+                        .contentShape(.circle)
                 }
                 .buttonStyle(.plain)
-                .disabled(!hasColorControls)
+                .disabled(!hasColorControls || !isReachable)
                 .accessibilityLabel("Color of \(light.name)")
 
                 VStack(alignment: .leading, spacing: 1) {
@@ -128,11 +165,19 @@ struct LightRow: View {
                 Toggle("Power", isOn: Binding(get: { light.isOn }, set: { onPower($0) }))
                     .labelsHidden()
                     .tint(.vero)
+                    .disabled(!isReachable)
                     .accessibilityIdentifier("light-\(light.name)")
             }
             if light.brightness != nil {
                 BrightnessBar(
-                    value: light.brightness ?? 0, isOn: light.isOn, tint: tint, height: 36, onChange: onBrightness)
+                    value: light.brightness ?? 0,
+                    isOn: light.isOn && isReachable,
+                    tint: tint,
+                    height: 36,
+                    isEnabled: isReachable,
+                    accessibilityName: light.name,
+                    onChange: onBrightness
+                )
             }
         }
         .padding(14)
@@ -154,10 +199,14 @@ struct LightColorSheet: View {
                 // Warm is a high mirek value; the slider runs warm to cool, left to right.
                 Slider(
                     value: Binding(
-                        get: { Double(range.upperBound) - mirek + Double(range.lowerBound) },
+                        get: {
+                            let clamped = min(max(mirek, Double(range.lowerBound)), Double(range.upperBound))
+                            return Double(range.upperBound) - clamped + Double(range.lowerBound)
+                        },
                         set: {
-                            mirek = Double(range.upperBound) - $0 + Double(range.lowerBound)
-                            store.setLight(light, mirek: Int(mirek.rounded()))
+                            let next = Double(range.upperBound) - $0 + Double(range.lowerBound)
+                            mirek = next
+                            store.setLight(light, mirek: Int(next.rounded()))
                         }),
                     in: Double(range.lowerBound)...Double(range.upperBound)
                 ) {
@@ -171,18 +220,48 @@ struct LightColorSheet: View {
             PaletteStrip(
                 showsWhites: light.mirekRange != nil,
                 showsColors: light.xy != nil,
+                mirekRange: light.mirekRange,
+                selectedMirek: light.mirek,
+                selectedColor: light.xy,
                 onMirek: {
-                    mirek = Double($0)
+                    mirek = Double(clamped($0))
                     store.setLight(light, mirek: $0)
                 },
                 onColor: { store.setLight(light, color: $0) }
             )
+            if light.xy != nil {
+                ColorPicker(
+                    "Custom color",
+                    selection: Binding(
+                        get: { light.displayColor.color },
+                        set: { picked in
+                            var r: CGFloat = 1
+                            var g: CGFloat = 1
+                            var b: CGFloat = 1
+                            var a: CGFloat = 1
+                            UIColor(picked).getRed(&r, green: &g, blue: &b, alpha: &a)
+                            store.setLight(light, color: ColorMath.xy(RGB(r: Double(r), g: Double(g), b: Double(b))))
+                        }
+                    ),
+                    supportsOpacity: false
+                )
+                .font(.system(size: 15, weight: .semibold))
+            }
             Spacer(minLength: 0)
         }
         .padding(20)
-        .onAppear {
-            if let current = light.mirek { mirek = Double(current) }
-        }
+        .onAppear { syncMirek() }
+        .onChange(of: light.mirek) { _, _ in syncMirek() }
+    }
+
+    private func clamped(_ value: Int) -> Int {
+        guard let range = light.mirekRange else { return value }
+        return min(max(value, range.lowerBound), range.upperBound)
+    }
+
+    private func syncMirek() {
+        let initial = light.mirek ?? 366
+        mirek = Double(clamped(initial))
     }
 }
 

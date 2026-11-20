@@ -163,6 +163,12 @@ def handle_put(kind, resource_id, body):
         changed = refresh_group(grouped["id"])
         if changed:
             changes.append({"id": grouped["id"], "type": "grouped_light", "owner": grouped["owner"], **changed})
+        if not grouped["on"]["on"]:
+            owner_id = grouped["owner"]["rid"]
+            for scene in resources.values():
+                if scene["type"] == "scene" and scene["group"]["rid"] == owner_id and scene["status"]["active"] != "inactive":
+                    scene["status"]["active"] = "inactive"
+                    changes.append({"id": scene["id"], "type": "scene", "status": {"active": "inactive"}})
     return changes
 
 

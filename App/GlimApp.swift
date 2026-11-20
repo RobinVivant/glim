@@ -1,6 +1,7 @@
 import AppIntents
 import HueKit
 import SwiftUI
+import UIKit
 
 @main
 struct GlimApp: App {
@@ -20,6 +21,9 @@ struct GlimApp: App {
 @Observable
 final class AppModel {
     private(set) var store: HomeStore?
+    var pendingGroupID: String?
+
+    @ObservationIgnored private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
     init() {
         #if DEBUG
@@ -27,19 +31,55 @@ final class AppModel {
         if ProcessInfo.processInfo.environment["GLIM_RESET"] != nil { Glim.storage.deleteAll() }
         #endif
         if let credentials = Glim.storage.loadCredentials() {
-            store = HomeStore(credentials: credentials, storage: Glim.storage)
+            store = makeStore(credentials: credentials)
         }
     }
 
+    private func makeStore(credentials: BridgeCredentials) -> HomeStore {
+        HomeStore(
+            credentials: credentials,
+            storage: Glim.storage,
+            onQueueActivity: { [weak self] active in
+                Task { @MainActor in self?.updateBackgroundTask(active: active) }
+            }
+        )
+    }
+
+    private func updateBackgroundTask(active: Bool) {
+        if active {
+            guard backgroundTaskID == .invalid else { return }
+            backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "HueCommands") { [weak self] in
+                Task { @MainActor in self?.endBackgroundTask() }
+            }
+        } else {
+            endBackgroundTask()
+        }
+    }
+
+    private func endBackgroundTask() {
+        guard backgroundTaskID != .invalid else { return }
+        let id = backgroundTaskID
+        backgroundTaskID = .invalid
+        UIApplication.shared.endBackgroundTask(id)
+    }
+
     func paired(_ credentials: BridgeCredentials) {
+        let previousBridgeID = store?.credentials.bridgeID ?? Glim.storage.loadCredentials()?.bridgeID
+        store?.stop()
+        if let previousBridgeID, previousBridgeID != credentials.bridgeID {
+            Glim.storage.deleteSnapshot()
+        }
         try? Glim.storage.saveCredentials(credentials)
-        store = HomeStore(credentials: credentials, storage: Glim.storage)
-        store?.start()
+        let newStore = makeStore(credentials: credentials)
+        store = newStore
+        newStore.start()
+        Glim.reloadWidgets()
     }
 
     func forgetBridge() {
         store?.stop()
         store = nil
+        endBackgroundTask()
         Glim.storage.deleteAll()
         Glim.reloadWidgets()
     }
@@ -54,13 +94,15 @@ struct RootView: View {
             if let store = model.store, !store.needsPairing {
                 HomeView(store: store)
             } else {
-                SetupView()
+                SetupView(reason: pairingReason)
             }
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
             switch phase {
             case .active:
-                model.store?.start()
+                if let store = model.store, !store.needsPairing {
+                    store.start()
+                }
             case .background:
                 model.store?.stop()
                 Glim.reloadWidgets()
@@ -68,6 +110,15 @@ struct RootView: View {
                 break
             }
         }
+        .onOpenURL { url in
+            model.pendingGroupID = Glim.groupID(from: url)
+        }
+    }
+
+    private var pairingReason: String? {
+        guard let store = model.store, store.needsPairing else { return nil }
+        if case .offline(let message) = store.connection { return message }
+        return HueError.unauthorized.localizedDescription
     }
 }
 

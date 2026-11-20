@@ -24,6 +24,7 @@ public enum HueError: Error, LocalizedError, Equatable {
     case notPaired
     case linkButtonNotPressed
     case unauthorized
+    case certificateChanged
     case rateLimited
     case untrustedBridge
     case http(Int, String)
@@ -34,6 +35,7 @@ public enum HueError: Error, LocalizedError, Equatable {
         case .notPaired: "No Hue bridge is paired yet."
         case .linkButtonNotPressed: "Press the link button on the bridge."
         case .unauthorized: "The bridge no longer accepts this app. Pair again."
+        case .certificateChanged: "The bridge's certificate changed. Forget this bridge in Settings and pair again."
         case .rateLimited: "The bridge is busy."
         case .untrustedBridge: "The device at this address did not identify as the expected Hue bridge."
         case .http(let code, let message): message.isEmpty ? "Bridge error \(code)." : message
@@ -46,26 +48,62 @@ public enum HueError: Error, LocalizedError, Equatable {
 public final class HueClient: Sendable {
     public let credentials: BridgeCredentials
     private let session: URLSession
-    private let streamSession: URLSession
+    private let pinDelegate: PinningDelegate
+    private let streamPinDelegate: PinningDelegate
+    private let streamSessionBox = Mutex<URLSession?>(nil)
 
     public init(credentials: BridgeCredentials, requestTimeout: TimeInterval = 4) {
         self.credentials = credentials
-        session = HueClient.makeSession(pin: .pinned(credentials.certificatePin), timeout: requestTimeout)
-        streamSession = HueClient.makeSession(pin: .pinned(credentials.certificatePin), timeout: 3600)
+        pinDelegate = PinningDelegate(mode: .pinned(credentials.certificatePin))
+        streamPinDelegate = PinningDelegate(mode: .pinned(credentials.certificatePin))
+        session = HueClient.makeSession(delegate: pinDelegate, timeout: requestTimeout)
     }
 
     deinit {
         session.invalidateAndCancel()
-        streamSession.invalidateAndCancel()
+        streamSessionBox.withLock { $0?.invalidateAndCancel() }
     }
 
     static func makeSession(pin: PinningDelegate.Mode, timeout: TimeInterval) -> URLSession {
+        makeSession(delegate: PinningDelegate(mode: pin), timeout: timeout)
+    }
+
+    static func makeSession(delegate: PinningDelegate, timeout: TimeInterval) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = timeout
         configuration.waitsForConnectivity = false
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        return URLSession(configuration: configuration, delegate: PinningDelegate(mode: pin), delegateQueue: nil)
+        return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+    }
+
+    private func getStreamSession() -> URLSession {
+        streamSessionBox.withLock { existing in
+            if let existing { return existing }
+            let created = HueClient.makeSession(delegate: streamPinDelegate, timeout: 3600)
+            existing = created
+            return created
+        }
+    }
+
+    public static func normalizedHost(_ raw: String) -> String {
+        var host = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        for prefix in ["https://", "http://"] where host.lowercased().hasPrefix(prefix) {
+            host = String(host.dropFirst(prefix.count))
+            break
+        }
+        if let slash = host.firstIndex(of: "/") {
+            host = String(host[..<slash])
+        }
+        if !host.hasPrefix("["), host.filter({ $0 == ":" }).count > 1 {
+            host = "[\(host)]"
+        }
+        return host
+    }
+
+    static func isLoopback(_ rawHost: String) -> Bool {
+        let host = normalizedHost(rawHost).lowercased()
+        return host.hasPrefix("127.0.0.1") || host.hasPrefix("localhost") || host.hasPrefix("[::1]")
     }
 
     // MARK: Reading
@@ -82,9 +120,14 @@ public final class HueClient: Sendable {
     }
 
     private func get(_ path: String) async throws -> [JSONValue] {
-        let (data, response) = try await session.data(for: request("GET", path))
-        try HueClient.check(response, data)
-        return try JSONValue(data: data)["data"]?.array ?? []
+        do {
+            let (data, response) = try await session.data(for: try request("GET", path))
+            try HueClient.check(response, data)
+            return try JSONValue(data: data)["data"]?.array ?? []
+        } catch {
+            if pinDelegate.didRejectPin { throw HueError.certificateChanged }
+            throw error
+        }
     }
 
     // MARK: Writing
@@ -93,8 +136,13 @@ public final class HueClient: Sendable {
         var request = try request("PUT", path)
         request.httpBody = try body.data()
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let (data, response) = try await session.data(for: request)
-        try HueClient.check(response, data)
+        do {
+            let (data, response) = try await session.data(for: request)
+            try HueClient.check(response, data)
+        } catch {
+            if pinDelegate.didRejectPin { throw HueError.certificateChanged }
+            throw error
+        }
     }
 
     public func setGroupedLight(_ id: String, _ body: JSONValue) async throws {
@@ -120,8 +168,9 @@ public final class HueClient: Sendable {
 
     /// Live changes from the bridge. The stream ends or throws when the connection drops.
     public func events() -> AsyncThrowingStream<[HueEvent], Error> {
-        AsyncThrowingStream { continuation in
-            let task = Task { [streamSession] in
+        let streamSession = getStreamSession()
+        return AsyncThrowingStream { continuation in
+            let task = Task {
                 do {
                     var request = try self.request("GET", "/eventstream/clip/v2")
                     request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
@@ -133,7 +182,11 @@ public final class HueClient: Sendable {
                     }
                     continuation.finish()
                 } catch {
-                    continuation.finish(throwing: error)
+                    if self.streamPinDelegate.didRejectPin {
+                        continuation.finish(throwing: HueError.certificateChanged)
+                    } else {
+                        continuation.finish(throwing: error)
+                    }
                 }
             }
             continuation.onTermination = { _ in task.cancel() }
@@ -143,7 +196,8 @@ public final class HueClient: Sendable {
     // MARK: Plumbing
 
     private func request(_ method: String, _ path: String) throws -> URLRequest {
-        guard let url = URL(string: "https://\(credentials.host)\(path)") else { throw HueError.invalidResponse }
+        let host = HueClient.normalizedHost(credentials.host)
+        guard !host.isEmpty, let url = URL(string: "https://\(host)\(path)") else { throw HueError.invalidResponse }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue(credentials.applicationKey, forHTTPHeaderField: "hue-application-key")
@@ -179,12 +233,14 @@ final class PinningDelegate: NSObject, URLSessionTaskDelegate, Sendable {
 
     let mode: Mode
     private let observation = Mutex<Observation?>(nil)
+    private let rejected = Mutex(false)
 
     init(mode: Mode) {
         self.mode = mode
     }
 
     var observed: Observation? { observation.withLock { $0 } }
+    var didRejectPin: Bool { rejected.withLock { $0 } }
 
     func urlSession(
         _ session: URLSession, didReceive challenge: URLAuthenticationChallenge
@@ -209,7 +265,10 @@ final class PinningDelegate: NSObject, URLSessionTaskDelegate, Sendable {
         let pin = Data(SHA256.hash(data: SecCertificateCopyData(leaf) as Data)).base64EncodedString()
         switch mode {
         case .pinned(let expected):
-            guard pin == expected else { return (.cancelAuthenticationChallenge, nil) }
+            guard pin == expected else {
+                rejected.withLock { $0 = true }
+                return (.cancelAuthenticationChallenge, nil)
+            }
         case .capture:
             let subject = SecCertificateCopySubjectSummary(leaf) as String? ?? ""
             observation.withLock { $0 = Observation(pin: pin, subject: subject) }

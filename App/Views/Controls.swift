@@ -1,5 +1,6 @@
 import HueKit
 import SwiftUI
+import UIKit
 
 @MainActor
 enum Haptics {
@@ -38,6 +39,7 @@ struct BrightnessSurface<Content: View>: View {
     let tint: Color
     /// False for on/off devices: the surface is full when on and does not drag.
     var isDimmable = true
+    var isEnabled = true
     var accessibilityName = "Brightness"
     let onChange: (Double) -> Void
     var onTap: (() -> Void)?
@@ -45,55 +47,182 @@ struct BrightnessSurface<Content: View>: View {
 
     @State private var dragStart: Double?
     @State private var dragValue: Double?
-    @State private var isSideways: Bool?
+    @State private var dragBaseX: CGFloat?
+    @State private var lastSentStep: Int?
 
     var body: some View {
         // A light can be on at 0, its lowest level; that still reads as on.
         let shown = isDimmable ? dragValue ?? (isOn ? max(value, 1) : 0) : (isOn ? 100 : 0)
+        let isDragging = dragValue != nil
         GeometryReader { proxy in
             let fill = max(0, proxy.size.width * shown / 100)
             ZStack(alignment: .leading) {
-                Rectangle().fill(tint.opacity(0.42)).frame(width: fill)
-                if shown > 0, shown < 100 {
-                    Rectangle().fill(tint.opacity(0.95)).frame(width: 2).offset(x: max(0, fill - 2))
+                Group {
+                    LinearGradient(
+                        colors: [tint.opacity(0.24), tint.opacity(0.46)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    .frame(width: fill)
+                    if shown > 0, shown < 100 {
+                        Rectangle()
+                            .fill(tint.opacity(isDragging ? 0.95 : 0.52))
+                            .frame(width: 1.5)
+                            .offset(x: max(0, fill - 1.5))
+                    }
                 }
+                .animation(isDragging ? nil : .snappy(duration: 0.22), value: shown)
+
                 content(shown).frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .contentShape(.rect)
-            .onTapGesture { onTap?() }
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 6)
-                    .onChanged { gesture in
-                        if isSideways == nil {
-                            isSideways = abs(gesture.translation.width) > abs(gesture.translation.height)
+            .overlay {
+                HorizontalDragOverlay(
+                    allowsDrag: isDimmable && isEnabled,
+                    onTap: onTap,
+                    onDragChanged: { translationX in
+                        guard proxy.size.width > 0 else { return }
+                        if dragBaseX == nil {
+                            dragBaseX = translationX
+                            dragStart = isOn ? max(value, 1) : 0
+                            lastSentStep = nil
                         }
-                        guard isSideways == true, proxy.size.width > 0 else { return }
-                        let start = dragStart ?? (isOn ? value : 0)
-                        dragStart = start
-                        let next = min(max(start + gesture.translation.width / proxy.size.width * 100, 0), 100)
-                        if next.rounded() != dragValue?.rounded() {
-                            if next < 1 || next >= 100 { Haptics.click() }
-                            onChange(next)
+                        let start = dragStart ?? 0
+                        let delta = translationX - (dragBaseX ?? 0)
+                        let next = min(max(start + delta / proxy.size.width * 100, 0), 100)
+                        let step = next < 0.5 ? 0 : min(max(Int(next.rounded()), 1), 100)
+                        if step != lastSentStep {
+                            if step == 0 || step == 100 { Haptics.click() }
+                            lastSentStep = step
+                            onChange(Double(step))
                         }
                         dragValue = next
-                    }
-                    .onEnded { _ in
-                        isSideways = nil
+                    },
+                    onDragEnded: {
                         dragStart = nil
                         dragValue = nil
-                    },
-                including: isDimmable ? .all : .subviews
-            )
+                        dragBaseX = nil
+                        lastSentStep = nil
+                    }
+                )
+            }
         }
-        .animation(dragValue == nil ? .snappy(duration: 0.22) : nil, value: shown)
         .accessibilityElement()
         .accessibilityLabel(accessibilityName)
         .accessibilityValue(isDimmable ? (shown >= 1 ? "\(Int(shown.rounded())) percent" : "Off") : (isOn ? "On" : "Off"))
-        .accessibilityAction { onTap?() }
+        .modifier(ConditionalTapAction(onTap: onTap))
         .accessibilityAdjustableAction { direction in
-            guard isDimmable else { return }
+            guard isDimmable, isEnabled else { return }
             let current = isOn ? value : 0
             onChange(min(max(current + (direction == .increment ? 10 : -10), 0), 100))
+        }
+    }
+}
+
+private struct ConditionalTapAction: ViewModifier {
+    let onTap: (() -> Void)?
+
+    func body(content: Content) -> some View {
+        if let onTap {
+            content.accessibilityAction { onTap() }
+        } else {
+            content
+        }
+    }
+}
+
+/// UIKit-backed horizontal pan + tap overlay so sideways dimming locks cleanly against a vertical ScrollView
+/// and cancels/resets reliably if interrupted.
+private struct HorizontalDragOverlay: UIViewRepresentable {
+    let allowsDrag: Bool
+    let onTap: (() -> Void)?
+    let onDragChanged: (CGFloat) -> Void
+    let onDragEnded: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onTap: onTap, onDragChanged: onDragChanged, onDragEnded: onDragEnded)
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+
+        let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan(_:)))
+        pan.maximumNumberOfTouches = 1
+        pan.delegate = context.coordinator
+
+        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap))
+        tap.require(toFail: pan)
+
+        view.addGestureRecognizer(pan)
+        view.addGestureRecognizer(tap)
+        context.coordinator.pan = pan
+        context.coordinator.tap = tap
+        updateRecognizerState(coordinator: context.coordinator)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.onTap = onTap
+        context.coordinator.onDragChanged = onDragChanged
+        context.coordinator.onDragEnded = onDragEnded
+        updateRecognizerState(coordinator: context.coordinator)
+    }
+
+    private func updateRecognizerState(coordinator: Coordinator) {
+        coordinator.pan?.isEnabled = allowsDrag
+        coordinator.tap?.isEnabled = onTap != nil
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var onTap: (() -> Void)?
+        var onDragChanged: (CGFloat) -> Void
+        var onDragEnded: () -> Void
+        weak var pan: UIPanGestureRecognizer?
+        weak var tap: UITapGestureRecognizer?
+
+        init(
+            onTap: (() -> Void)?,
+            onDragChanged: @escaping (CGFloat) -> Void,
+            onDragEnded: @escaping () -> Void
+        ) {
+            self.onTap = onTap
+            self.onDragChanged = onDragChanged
+            self.onDragEnded = onDragEnded
+        }
+
+        @objc func handleTap() {
+            onTap?()
+        }
+
+        @objc func handlePan(_ recognizer: UIPanGestureRecognizer) {
+            switch recognizer.state {
+            case .began, .changed:
+                onDragChanged(recognizer.translation(in: recognizer.view).x)
+            case .ended, .cancelled, .failed:
+                onDragEnded()
+            default:
+                break
+            }
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard gestureRecognizer === pan, let pan = gestureRecognizer as? UIPanGestureRecognizer else {
+                return true
+            }
+            let translation = pan.translation(in: pan.view)
+            let velocity = pan.velocity(in: pan.view)
+            let dx = abs(translation.x) > 0 || abs(translation.y) > 0 ? abs(translation.x) : abs(velocity.x)
+            let dy = abs(translation.x) > 0 || abs(translation.y) > 0 ? abs(translation.y) : abs(velocity.y)
+            return dx > dy * 1.15
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            gestureRecognizer === pan && otherGestureRecognizer.view is UIScrollView
         }
     }
 }
@@ -104,10 +233,19 @@ struct BrightnessBar: View {
     let isOn: Bool
     let tint: Color
     var height: CGFloat = 46
+    var isEnabled = true
+    var accessibilityName = "Brightness"
     let onChange: (Double) -> Void
 
     var body: some View {
-        BrightnessSurface(value: value, isOn: isOn, tint: tint, onChange: onChange) { shown in
+        BrightnessSurface(
+            value: value,
+            isOn: isOn,
+            tint: tint,
+            isEnabled: isEnabled,
+            accessibilityName: accessibilityName,
+            onChange: onChange
+        ) { shown in
             HStack {
                 Image(systemName: shown >= 1 ? "sun.max.fill" : "sun.min")
                 Spacer()
@@ -147,21 +285,13 @@ struct PowerButton: View {
     }
 }
 
-extension LightScene {
-    var swatch: AnyShapeStyle {
-        let colors = swatches.map(\.color)
-        switch colors.count {
-        case 0: return AnyShapeStyle(Color.glow)
-        case 1: return AnyShapeStyle(colors[0])
-        default: return AnyShapeStyle(AngularGradient(colors: colors + [colors[0]], center: .center))
-        }
-    }
-}
-
 /// A scene as a round swatch with its name under it; the active one has a teal ring.
 struct SceneDot: View {
     let scene: LightScene
+    var isActive: Bool?
     let action: () -> Void
+
+    private var active: Bool { isActive ?? scene.isActive }
 
     var body: some View {
         Button {
@@ -175,11 +305,11 @@ struct SceneDot: View {
                     .overlay(Circle().strokeBorder(.white.opacity(0.25), lineWidth: 0.5))
                     .padding(4)
                     .overlay {
-                        if scene.isActive { Circle().strokeBorder(Color.vero, lineWidth: 2) }
+                        if active { Circle().strokeBorder(Color.vero, lineWidth: 2) }
                     }
                 Text(scene.name)
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(scene.isActive ? Color.vero : .white.opacity(0.8))
+                    .foregroundStyle(active ? Color.vero : .white.opacity(0.8))
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity)
@@ -187,14 +317,17 @@ struct SceneDot: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(scene.name)
-        .accessibilityAddTraits(scene.isActive ? .isSelected : [])
+        .accessibilityAddTraits(active ? .isSelected : [])
     }
 }
 
 /// A scene as a glass pill with a swatch, for the detail screen.
 struct SceneChip: View {
     let scene: LightScene
+    var isActive: Bool?
     let action: () -> Void
+
+    private var active: Bool { isActive ?? scene.isActive }
 
     var body: some View {
         Button {
@@ -209,15 +342,15 @@ struct SceneChip: View {
             .padding(.trailing, 14)
             .frame(height: 42)
             .background(.white.opacity(0.07), in: .capsule)
-            .overlay(Capsule().strokeBorder(scene.isActive ? Color.vero : .white.opacity(0.12), lineWidth: scene.isActive ? 2 : 1))
+            .overlay(Capsule().strokeBorder(active ? Color.vero : .white.opacity(0.12), lineWidth: active ? 2 : 1))
             .contentShape(.capsule)
         }
         .buttonStyle(.plain)
-        .accessibilityAddTraits(scene.isActive ? .isSelected : [])
+        .accessibilityAddTraits(active ? .isSelected : [])
     }
 }
 
-/// One light as a pill that switches it; teal while it is on.
+/// One light as a pill that switches it; tinted with the light's color while it is on.
 struct LightChip: View {
     let light: Light
     let isReachable: Bool
@@ -225,18 +358,22 @@ struct LightChip: View {
 
     var body: some View {
         let on = light.isOn && isReachable
+        let dotColor = light.displayColor.color
         Button {
             Haptics.tap()
             action()
         } label: {
             HStack(spacing: 7) {
-                Circle().fill(on ? Color.vero : .white.opacity(0.35)).frame(width: 8, height: 8)
+                Circle()
+                    .fill(on ? dotColor : .white.opacity(0.3))
+                    .frame(width: 8, height: 8)
+                    .shadow(color: on ? dotColor.opacity(0.6) : .clear, radius: 4)
                 Text(light.name).font(.system(size: 14, weight: .semibold)).lineLimit(1)
             }
             .padding(.horizontal, 14)
             .frame(height: 36)
-            .background(on ? Color.vero.opacity(0.14) : .white.opacity(0.06), in: .capsule)
-            .overlay(Capsule().strokeBorder(on ? Color.vero.opacity(0.6) : .white.opacity(0.10), lineWidth: 1))
+            .background(on ? dotColor.opacity(0.14) : .white.opacity(0.06), in: .capsule)
+            .overlay(Capsule().strokeBorder(on ? dotColor.opacity(0.55) : .white.opacity(0.10), lineWidth: 1))
             .contentShape(.capsule)
         }
         .buttonStyle(.plain)
@@ -251,49 +388,81 @@ struct LightChip: View {
 struct PaletteStrip: View {
     var showsWhites = true
     var showsColors = true
+    var mirekRange: ClosedRange<Int>? = nil
+    var selectedMirek: Int? = nil
+    var selectedColor: XY? = nil
+    var horizontalPadding: CGFloat = 0
     let onMirek: (Int) -> Void
     let onColor: (XY) -> Void
 
     static let whites = [500, 400, 333, 250, 182]
-    static let colors: [RGB] = [
-        RGB(r: 1, g: 0.18, b: 0.15), RGB(r: 1, g: 0.5, b: 0.1), RGB(r: 1, g: 0.85, b: 0.2),
-        RGB(r: 0.3, g: 0.9, b: 0.35), RGB(r: 0.2, g: 0.85, b: 0.9), RGB(r: 0.2, g: 0.4, b: 1),
-        RGB(r: 0.6, g: 0.3, b: 1), RGB(r: 1, g: 0.35, b: 0.7),
+    static let colors: [(name: String, rgb: RGB)] = [
+        ("Red", RGB(r: 1, g: 0.18, b: 0.15)),
+        ("Orange", RGB(r: 1, g: 0.5, b: 0.1)),
+        ("Amber", RGB(r: 1, g: 0.85, b: 0.2)),
+        ("Green", RGB(r: 0.3, g: 0.9, b: 0.35)),
+        ("Cyan", RGB(r: 0.2, g: 0.85, b: 0.9)),
+        ("Blue", RGB(r: 0.2, g: 0.4, b: 1)),
+        ("Violet", RGB(r: 0.6, g: 0.3, b: 1)),
+        ("Pink", RGB(r: 1, g: 0.35, b: 0.7)),
     ]
+
+    private var availableWhites: [Int] {
+        guard let range = mirekRange else { return Self.whites }
+        var seen = Set<Int>()
+        return Self.whites.compactMap { mirek in
+            let clamped = min(max(mirek, range.lowerBound), range.upperBound)
+            return seen.insert(clamped).inserted ? clamped : nil
+        }
+    }
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 10) {
                 if showsWhites {
-                    ForEach(PaletteStrip.whites, id: \.self) { mirek in
-                        dot(ColorMath.rgb(mirek: mirek).color, label: "\(1_000_000 / mirek) kelvin") { onMirek(mirek) }
+                    ForEach(availableWhites, id: \.self) { mirek in
+                        let isSelected = selectedMirek.map { abs($0 - mirek) <= 12 } ?? false
+                        dot(ColorMath.rgb(mirek: mirek).color, label: "\(1_000_000 / mirek) kelvin", isSelected: isSelected) {
+                            onMirek(mirek)
+                        }
                     }
                 }
-                if showsWhites && showsColors {
+                if showsWhites && showsColors && !availableWhites.isEmpty {
                     Capsule().fill(.white.opacity(0.15)).frame(width: 1, height: 26)
                 }
                 if showsColors {
-                    ForEach(PaletteStrip.colors, id: \.self) { color in
-                        dot(color.color, label: "Color") { onColor(ColorMath.xy(color)) }
+                    ForEach(PaletteStrip.colors, id: \.name) { entry in
+                        let xy = ColorMath.xy(entry.rgb)
+                        let isSelected = selectedMirek == nil
+                            && (selectedColor.map { hypot($0.x - xy.x, $0.y - xy.y) < 0.04 } ?? false)
+                        dot(entry.rgb.color, label: entry.name, isSelected: isSelected) {
+                            onColor(xy)
+                        }
                     }
                 }
             }
-            .padding(2)
+            .padding(.horizontal, horizontalPadding)
+            .padding(.vertical, 3)
         }
     }
 
-    private func dot(_ color: Color, label: String, action: @escaping () -> Void) -> some View {
+    private func dot(_ color: Color, label: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
         Button {
             Haptics.tap()
             action()
         } label: {
             Circle()
                 .fill(color)
-                .frame(width: 40, height: 40)
+                .frame(width: 38, height: 38)
                 .overlay(Circle().strokeBorder(.white.opacity(0.25), lineWidth: 0.5))
+                .padding(3)
+                .overlay {
+                    if isSelected { Circle().strokeBorder(Color.vero, lineWidth: 2) }
+                }
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 

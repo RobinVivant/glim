@@ -14,13 +14,16 @@ public struct BridgeInfo: Identifiable, Hashable, Sendable {
 public enum Pairing {
     /// Asks the device at `host` who it is and records its certificate.
     public static func probe(host: String) async throws -> BridgeInfo {
+        let host = HueClient.normalizedHost(host)
+        guard !host.isEmpty, let url = URL(string: "https://\(host)/api/0/config") else {
+            throw HueError.invalidResponse
+        }
         let delegate = PinningDelegate(mode: .capture)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 4
         let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
         defer { session.invalidateAndCancel() }
 
-        guard let url = URL(string: "https://\(host)/api/0/config") else { throw HueError.invalidResponse }
         let (data, response) = try await session.data(from: url)
         try HueClient.check(response, data)
         let config = try JSONValue(data: data)
@@ -44,7 +47,9 @@ public enum Pairing {
         let session = HueClient.makeSession(pin: .pinned(bridge.certificatePin), timeout: 4)
         defer { session.invalidateAndCancel() }
 
-        guard let url = URL(string: "https://\(bridge.host)/api") else { throw HueError.invalidResponse }
+        guard let url = URL(string: "https://\(HueClient.normalizedHost(bridge.host))/api") else {
+            throw HueError.invalidResponse
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         let instance = String(deviceName.filter { $0.isLetter || $0.isNumber || $0 == " " }.prefix(19))
@@ -73,17 +78,52 @@ public enum Discovery {
     /// Addresses of bridges on this network: local mDNS and Philips' discovery
     /// endpoint together, since mDNS does not cross subnets.
     public static func candidateHosts(timeout: Duration = .seconds(2)) async -> [String] {
-        async let local = mdns(timeout: timeout)
-        async let cloud = cloud()
+        let cloudTask = Task { await cloud() }
+        let local = await mdns(timeout: timeout)
+        let cloudHosts: [String]
+        if local.isEmpty {
+            cloudHosts = await cloudWithCap(.seconds(2), task: cloudTask)
+        } else {
+            // Do not make mDNS wait on a slow/offline cloud call once local answers are ready.
+            cloudHosts = await cloudWithCap(.milliseconds(350), task: cloudTask)
+        }
         var hosts: [String] = []
-        for host in await local + cloud where !hosts.contains(host) { hosts.append(host) }
+        for host in local + cloudHosts where !hosts.contains(host) { hosts.append(host) }
         return hosts
+    }
+
+    private static func cloudWithCap(_ cap: Duration, task: Task<[String], Never>) async -> [String] {
+        await withTaskGroup(of: [String].self) { group in
+            group.addTask { await task.value }
+            group.addTask {
+                try? await Task.sleep(for: cap)
+                return []
+            }
+            let first = await group.next() ?? []
+            group.cancelAll()
+            task.cancel()
+            return first
+        }
     }
 
     /// Bridges that answer and identify themselves, ready to pair with.
     public static func bridges(timeout: Duration = .seconds(2)) async -> [BridgeInfo] {
-        let hosts = await candidateHosts(timeout: timeout)
-        return await withTaskGroup(of: BridgeInfo?.self) { group in
+        await probeHosts(await candidateHosts(timeout: timeout))
+    }
+
+    /// The current address of a known bridge, for when its IP changed.
+    public static func locate(bridgeID: String) async -> String? {
+        await bridges().first { $0.bridgeID == bridgeID.lowercased() }?.host
+    }
+
+    /// Fast local-only bridge lookup, suited to short-lived widgets and intents.
+    public static func locateLocal(bridgeID: String) async -> String? {
+        let hosts = await mdns(timeout: .milliseconds(800))
+        return await probeHosts(hosts).first { $0.bridgeID == bridgeID.lowercased() }?.host
+    }
+
+    private static func probeHosts(_ hosts: [String]) async -> [BridgeInfo] {
+        await withTaskGroup(of: BridgeInfo?.self) { group in
             for host in hosts { group.addTask { try? await Pairing.probe(host: host) } }
             var found: [BridgeInfo] = []
             for await bridge in group {
@@ -93,16 +133,12 @@ public enum Discovery {
         }
     }
 
-    /// The current address of a known bridge, for when its IP changed.
-    public static func locate(bridgeID: String) async -> String? {
-        await bridges().first { $0.bridgeID == bridgeID.lowercased() }?.host
-    }
-
     static func cloud() async -> [String] {
         guard let url = URL(string: "https://discovery.meethue.com/") else { return [] }
         var request = URLRequest(url: url)
-        request.timeoutInterval = 4
-        guard let (data, _) = try? await URLSession.shared.data(for: request),
+        request.timeoutInterval = 2
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+            let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
             let entries = try? JSONValue(data: data).array
         else { return [] }
         return entries.compactMap { $0["internalipaddress"]?.string }
@@ -115,7 +151,15 @@ public enum Discovery {
             found.set(results.map(\.endpoint))
         }
         browser.start(queue: .global())
-        try? await Task.sleep(for: timeout)
+        let deadline = ContinuousClock.now + timeout
+        var firstSeenAt: ContinuousClock.Instant?
+        while ContinuousClock.now < deadline {
+            if !found.endpoints.isEmpty {
+                if firstSeenAt == nil { firstSeenAt = ContinuousClock.now }
+                if let firstSeenAt, ContinuousClock.now - firstSeenAt >= .milliseconds(350) { break }
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
         browser.cancel()
 
         return await withTaskGroup(of: String?.self) { group in
@@ -152,7 +196,7 @@ public enum Discovery {
                     } else {
                         finish(nil)
                     }
-                case .failed, .cancelled, .waiting:
+                case .failed, .cancelled:
                     finish(nil)
                 default:
                     break

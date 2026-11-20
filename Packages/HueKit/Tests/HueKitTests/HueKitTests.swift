@@ -104,6 +104,69 @@ func makeSnapshot() throws -> HomeSnapshot {
         #expect(ceiling.mirekRange == 153...454)
         #expect(snapshot.isReachable(sofa))
         #expect(!snapshot.isReachable(ceiling))
+        #expect(snapshot.clampedMirek(500, for: ceiling) == 454)
+        #expect(snapshot.clampedMirek(100, for: ceiling) == 153)
+        #expect(snapshot.clampedMirek(500, for: snapshot.groups[0]) == 454)
+    }
+
+    @Test func ignoresStaleMirekWhenMirekValidIsFalse() throws {
+        let json: JSONValue = [
+            "id": "light-x",
+            "type": "light",
+            "owner": ["rid": "dev-x"],
+            "on": ["on": true],
+            "color_temperature": [
+                "mirek": 366,
+                "mirek_valid": false,
+                "mirek_schema": ["mirek_minimum": 153, "mirek_maximum": 500],
+            ],
+            "color": ["xy": ["x": 0.17, "y": 0.12]],
+        ]
+        let light = try #require(Light(json: json))
+        #expect(light.mirek == nil)
+        #expect(light.displayColor.b > light.displayColor.r)
+    }
+
+    @Test func extractsGradientAndPaletteTemperatureSceneSwatches() throws {
+        let gradientJSON: JSONValue = [
+            "id": "scene-grad",
+            "type": "scene",
+            "metadata": ["name": "Sunset"],
+            "group": ["rid": "room-1"],
+            "status": ["active": "inactive"],
+            "actions": [
+                [
+                    "action": [
+                        "on": ["on": true],
+                        "gradient": [
+                            "points": [
+                                ["color": ["xy": ["x": 0.64, "y": 0.33]]],
+                                ["color": ["xy": ["x": 0.17, "y": 0.12]]],
+                            ]
+                        ],
+                    ]
+                ]
+            ],
+        ]
+        let gradient = try #require(LightScene(json: gradientJSON))
+        #expect(gradient.swatches.count == 2)
+
+        let tempPaletteJSON: JSONValue = [
+            "id": "scene-temp",
+            "type": "scene",
+            "metadata": ["name": "Warm"],
+            "group": ["rid": "room-1"],
+            "status": ["active": "inactive"],
+            "actions": [],
+            "palette": [
+                "color": [],
+                "color_temperature": [
+                    ["color_temperature": ["mirek": 450]]
+                ],
+            ],
+        ]
+        let tempPalette = try #require(LightScene(json: tempPaletteJSON))
+        #expect(tempPalette.swatches.count == 1)
     }
 
     @Test func sortsScenesAndReadsActiveFlag() throws {
@@ -165,11 +228,32 @@ func makeSnapshot() throws -> HomeSnapshot {
         let room = snapshot.groups[0]
         snapshot.setGroupLocally(room, on: false)
         #expect(snapshot.lights(in: room).allSatisfy { !$0.isOn })
+        #expect(snapshot.scenes(in: room).allSatisfy { !$0.isActive })
         snapshot.setGroupLocally(room, brightness: 42)
         #expect(snapshot.lights(in: room).allSatisfy { $0.isOn && $0.brightness == 42 })
         #expect(snapshot.state(of: room).brightness == 42)
         snapshot.setAllLocally(on: false)
         #expect(!snapshot.anyLightOn)
+    }
+
+    @Test func preservesHeldOptimisticResourcesAcrossFullReload() throws {
+        var optimistic = try makeSnapshot()
+        let room = optimistic.groups[0]
+        optimistic.setGroupLocally(room, on: false)
+        let held = Set(optimistic.relatedHoldIDs(for: room))
+
+        let serverResources = try JSONValue(data: Data(fixture.utf8)).array ?? []
+        let reloaded = HomeSnapshot(resources: serverResources, preserving: held, from: optimistic)
+        #expect(!reloaded.state(of: room).isOn)
+        #expect(!reloaded.state(of: reloaded.groups[1]).isOn)
+        #expect(!reloaded.anyLightOn)
+    }
+
+    @Test func anyReachableLightOnIgnoresUnreachableLights() throws {
+        var snapshot = try makeSnapshot()
+        snapshot.setLightLocally(id: "light-1", patch: ["on": ["on": false]])
+        snapshot.setLightLocally(id: "light-2", patch: ["on": ["on": true]])
+        #expect(!snapshot.anyReachableLightOn)
     }
 
     @Test func switchingARoomOnShowsItsRememberedLevelAndMovesItsZone() throws {
@@ -294,5 +378,68 @@ func makeSnapshot() throws -> HomeSnapshot {
 
         #expect(attempts.withLock { $0 } == 2)
         #expect(failures.withLock { $0 } == ["boom"])
+    }
+
+    @Test func stripsIncompatibleFieldsWhenMergingCommands() {
+        let dimmed: JSONValue = ["on": ["on": true], "dimming": ["brightness": 5], "dynamics": ["duration": 200]]
+        let turnedOff = CommandQueue.mergeCommand(dimmed, with: ["on": ["on": false]])
+        #expect(turnedOff["on"]?["on"]?.bool == false)
+        #expect(turnedOff["dimming"] == nil)
+        #expect(turnedOff["dynamics"] == nil)
+
+        let colored: JSONValue = ["on": ["on": true], "color": ["xy": ["x": 0.5, "y": 0.4]]]
+        let switchedToWhite = CommandQueue.mergeCommand(colored, with: ["color_temperature": ["mirek": 300]])
+        #expect(switchedToWhite["color"] == nil)
+        #expect(switchedToWhite["color_temperature"]?["mirek"]?.int == 300)
+
+        let switchedBackToColor = CommandQueue.mergeCommand(switchedToWhite, with: ["color": ["xy": ["x": 0.2, "y": 0.2]]])
+        #expect(switchedBackToColor["color_temperature"] == nil)
+        #expect(switchedBackToColor["color"]?["xy"]?["x"]?.double == 0.2)
+    }
+
+    @Test func pacesGroupCommandsGloballyAcrossPaths() async throws {
+        let times = Mutex<[ContinuousClock.Instant]>([])
+        let queue = CommandQueue(
+            send: { _, _ in times.withLock { $0.append(.now) } },
+            onFailure: { _ in }
+        )
+
+        queue.submit(path: HueClient.path(.groupedLight, "gl-1"), body: ["on": ["on": true]])
+        queue.submit(path: HueClient.path(.groupedLight, "gl-2"), body: ["on": ["on": true]])
+        try await Task.sleep(for: .milliseconds(350))
+
+        let recorded = times.withLock { $0 }
+        #expect(recorded.count == 2)
+        #expect(recorded[1] - recorded[0] >= .milliseconds(100))
+    }
+}
+
+@Suite struct NetworkingAndRemoteTests {
+    @Test func normalizesBridgeHosts() {
+        #expect(HueClient.normalizedHost("  https://192.168.1.10/api  ") == "192.168.1.10")
+        #expect(HueClient.normalizedHost("http://127.0.0.1:8443/") == "127.0.0.1:8443")
+        #expect(HueClient.normalizedHost("fe80::1") == "[fe80::1]")
+        #expect(HueClient.normalizedHost("[fe80::1]:8443") == "[fe80::1]:8443")
+    }
+
+    @Test func remotePrefersFreshCacheWithinPostWriteWindow() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "glim-remote-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storage = HueStorage(directory: directory)
+        var snapshot = try makeSnapshot()
+        let room = snapshot.groups[0]
+        snapshot.setGroupLocally(room, on: false)
+        storage.saveSnapshot(snapshot)
+        storage.markRemoteWrite()
+        // Point credentials at an unreachable loopback port so a network call would fail/fallback;
+        // preferCacheWithin should return immediately without waiting for network timeout.
+        try storage.saveCredentials(
+            BridgeCredentials(host: "127.0.0.1:1", bridgeID: "abc", name: "Test", applicationKey: "k", certificatePin: "p")
+        )
+        let remote = HueRemote(storage: storage)
+        let started = ContinuousClock.now
+        let loaded = await remote.currentSnapshot(timeout: 2, preferCacheWithin: 5)
+        #expect(ContinuousClock.now - started < .milliseconds(500))
+        #expect(loaded == snapshot)
     }
 }

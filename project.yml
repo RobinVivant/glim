@@ -35,6 +35,9 @@ targets:
         NSBonjourServices: [_hue._tcp]
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         ITSAppUsesNonExemptEncryption: false
+        CFBundleURLTypes:
+          - CFBundleURLName: com.robinvivant.glim
+            CFBundleURLSchemes: [glim]
     entitlements:
       path: App/Glim.entitlements
       properties:
