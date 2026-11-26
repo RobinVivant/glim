@@ -1,2 +1,2 @@
-// Signing team lives in Local.xcconfig (not committed): DEVELOPMENT_TEAM = XXXXXXXXXX
+// Signing team lives in Local.xcconfig (not committed): DEVELOPMENT_TEAM = YOUR_TEAM_ID
 #include? "Local.xcconfig"
