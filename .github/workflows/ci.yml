@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  huekit-tests:
+    name: HueKit Unit & Mock Bridge Tests
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        run: |
+          if [ -d "/Applications/Xcode.app" ]; then
+            sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          fi
+          swift --version
+          xcodebuild -version
+
+      - name: Run HueKit unit tests
+        working-directory: Packages/HueKit
+        run: swift test
+
+      - name: Run HueKit mock-bridge HTTPS tests
+        run: |
+          python3 scripts/mock-bridge.py 8443 &
+          MOCK_PID=$!
+          trap 'kill "$MOCK_PID" 2>/dev/null || true' EXIT
+          sleep 2
+          cd Packages/HueKit
+          HUE_MOCK_HOST=127.0.0.1:8443 swift test
+
+      - name: Verify open-source secret and team scrubbing
+        run: |
+          if grep -rnE --exclude-dir=.build --exclude-dir=build --exclude-dir=.git "DEVELOPMENT_TEAM\s*[:=]\s*[\"']?[A-Z0-9]{10}|[0-9A-F]{8}-[0-9A-F]{16}|192\.168\.1\.111|robin\.vivant@(gmail|icloud)\.com" \
+            App Config Packages Shared UITests Widgets scripts project.yml README.md SECURITY.md CONTRIBUTING.md .github; then
+            echo "Found untracked team, device, IP, or personal identifiers!"
+            exit 1
+          fi

@@ -29,6 +29,9 @@ final class AppModel {
         #if DEBUG
         // Development: start unpaired, for exercising setup against the mock bridge.
         if ProcessInfo.processInfo.environment["GLIM_RESET"] != nil { Glim.storage.deleteAll() }
+        if let groupID = ProcessInfo.processInfo.environment["GLIM_OPEN_GROUP"], !groupID.isEmpty {
+            pendingGroupID = groupID
+        }
         #endif
         if let credentials = Glim.storage.loadCredentials() {
             store = makeStore(credentials: credentials)

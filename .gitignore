@@ -5,3 +5,13 @@ DerivedData/
 xcuserdata/
 *.xcodeproj
 Config/Local.xcconfig
+Packages/*/.build/
+Packages/*/.swiftpm/
+*.ipa
+*.xcarchive
+*.mobileprovision
+*.provisionprofile
+*.p12
+*.cer
+.env
+.env.*

@@ -4,8 +4,9 @@
 #   scripts/install.sh            first iPhone that devicectl lists
 #   scripts/install.sh <udid>     a specific device
 #
-# Needs an Apple account signed in to Xcode (Settings > Accounts). With a free
-# account the install expires after 7 days; run this again to renew it.
+# Needs an Apple account signed in to Xcode (Settings > Accounts). With a paid
+# Apple Developer account the install stays valid for 1 year; with a free
+# Personal Team it expires after 7 days (run this again to renew it).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -53,6 +54,6 @@ fi
 
 xcodegen generate --quiet
 xcodebuild -project Glim.xcodeproj -scheme Glim -configuration Release \
-  -destination "id=$device" -derivedDataPath build -allowProvisioningUpdates -quiet build
+  -destination "id=$device" -derivedDataPath build -allowProvisioningUpdates -allowProvisioningDeviceRegistration -quiet build
 xcrun devicectl device install app --device "$device" build/Build/Products/Release-iphoneos/Glim.app
 echo "Installed. On first launch, trust the developer under Settings > General > VPN & Device Management."
