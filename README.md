@@ -10,6 +10,12 @@ Glim is an open-source, local-only Philips Hue controller for iPhone that speaks
 |---|---|
 | <img src="assets/screenshot-home.png" alt="Glim home screen showing Hue rooms and brightness sliders" width="280"> | <img src="assets/screenshot-room.png" alt="Glim room detail view showing color dots, scenes, and individual light sliders" width="280"> |
 
+### Widgets
+
+| Small | Medium | Large |
+|---|---|---|
+| <img src="assets/screenshot-widget-small.png" alt="Glim Small Home Screen widget showing Living room power button, active Relax scene, and brightness bar" width="170"> | <img src="assets/screenshot-widget-medium.png" alt="Glim Medium Home Screen widget showing Living room brightness bar and four scene swatches" width="320"> | <img src="assets/screenshot-widget-large.png" alt="Glim Large Home Screen widget showing Living room brightness bar, six scenes, and individual light toggles" width="230"> |
+
 ## Quickstart
 
 Run Glim in the iOS Simulator against the bundled mock Hue bridge without touching real lights:
